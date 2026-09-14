@@ -5,8 +5,8 @@
 -- doubles as a reference for the whole API: each element type, every option that changes how it behaves,
 -- and the library-level settings underneath.
 --
--- Load it on its own with:
---   local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/centvindisc-byte/FishyUI/main/Library.lua"))()
+-- Run it straight off the repo:
+--   loadstring(game:HttpGet("https://raw.githubusercontent.com/centvindisc-byte/FishyUI/main/examples/demo.lua"))()
 --
 -- Things worth trying that no line of this file can show you:
 --   · press and pull a sidebar tab to carry it anywhere, then let go to snap it back
@@ -14,6 +14,25 @@
 --   · shove the window into the left or right edge of the screen to collapse it into the icon rail
 --   · the five buttons top-right: cursor, attachments, gradient palette, themes, minimise
 -------------------------------------------------------------------------------------------------------
+
+-- Works both ways: bundled after the library (the test build concatenates the two, so `Library` is
+-- already in scope) and run on its own, where it has to fetch the library itself. HttpGet is the
+-- executor's; GetAsync is the fallback so the file also runs in Studio.
+local Library = Library or (function()
+    local url = "https://raw.githubusercontent.com/centvindisc-byte/FishyUI/main/Library.lua"
+    -- HttpGet is injected by the executor and simply isn't a member of DataModel otherwise, and
+    -- indexing an Instance for a member it doesn't have raises rather than returning nil — so the
+    -- probe has to be wrapped. GetAsync is the fallback, which is what runs in Studio.
+    local hasHttpGet, httpGet = pcall(function() return game.HttpGet end)
+    local source
+    if hasHttpGet and typeof(httpGet) == "function" then
+        source = game:HttpGet(url)
+    else
+        source = game:GetService("HttpService"):GetAsync(url)
+    end
+    return loadstring(source)()
+end)()
+
 local Options, Toggles = Library.Options, Library.Toggles
 
 local function report(what)
