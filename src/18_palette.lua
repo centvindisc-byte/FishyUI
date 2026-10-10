@@ -1,16 +1,19 @@
 -------------------------------------------------------------------------------------------------------
--- Palette: a paint-palette-shaped gradient editor.
+-- Palette: the accent gradient editor.
 --
--- The palette blob at the top carries one glossy dab per gradient stop, arranged along its arc. Beneath
--- it the live ramp shows the gradient itself, with a draggable chip for every stop sitting right on it —
--- drag a chip to slide the stop, click to select, right-click to remove. The selected dab is repainted
--- with the shade square, the hue rail, a hex field or one of the preset ramps.
+-- A preview card at the top shows the gradient the way the interface will wear it (a toggle, a slider, a
+-- checkbox, a meter), sitting in a glow of its own colours. Beneath it, the gradient track carries a glass
+-- knob for every stop: drag a knob to slide its stop, click to select it, right-click to remove it, or
+-- click empty track to drop a new stop there. The selected stop is recoloured with the shade square, the
+-- hue rail or the hex field and placed exactly with the position field; the segmented control adds,
+-- removes, flips or evenly spaces stops, and a preset replaces the whole ramp.
 --
 -- Endpoints stay pinned at 0 and 1 so the ColorSequence is always valid. Every edit recolours the whole
 -- interface live through Library:SetAccentGradient.
 -------------------------------------------------------------------------------------------------------
-local PALETTE_WIDTH = 340
+local PALETTE_WIDTH = 360
 local PALETTE_MAX_STOPS = 8
+local PALETTE_KNOB = 22
 
 -- Sorted stops -> a valid ColorSequence (endpoints pinned; equal times nudged apart).
 local function stopsToSequence(stops)
@@ -51,10 +54,12 @@ end
 -- Ramps offered as one-tap starting points. Each is a plain list of colours, spread evenly.
 local PALETTE_PRESETS = {
     { Name = "Violet", Colors = { Color3.fromRGB(126, 66, 245), Color3.fromRGB(214, 150, 255) } },
-    { Name = "Sunset", Colors = { Color3.fromRGB(255, 94, 91), Color3.fromRGB(255, 176, 84), Color3.fromRGB(255, 231, 142) } },
     { Name = "Ocean", Colors = { Color3.fromRGB(28, 108, 222), Color3.fromRGB(72, 214, 236) } },
     { Name = "Mint", Colors = { Color3.fromRGB(24, 178, 134), Color3.fromRGB(150, 255, 208) } },
+    { Name = "Aurora", Colors = { Color3.fromRGB(0, 196, 166), Color3.fromRGB(120, 236, 196), Color3.fromRGB(160, 110, 255) } },
+    { Name = "Sunset", Colors = { Color3.fromRGB(255, 94, 91), Color3.fromRGB(255, 176, 84), Color3.fromRGB(255, 231, 142) } },
     { Name = "Candy", Colors = { Color3.fromRGB(255, 92, 170), Color3.fromRGB(168, 120, 255), Color3.fromRGB(96, 214, 255) } },
+    { Name = "Neon", Colors = { Color3.fromRGB(72, 236, 255), Color3.fromRGB(255, 72, 192) } },
     { Name = "Mono", Colors = { Color3.fromRGB(72, 72, 82), Color3.fromRGB(240, 240, 248) } },
 }
 
@@ -100,23 +105,94 @@ local function PaletteGlyph(parent, size, zIndex)
     return blob
 end
 
+-- The soft top-half sheen every gradient surface in the palette carries, so it reads as lit glass.
+local function paletteGloss(parent, radius, zIndex, strength)
+    local sheen = New("Frame", {
+        Name = "Gloss",
+        Size = UDim2.fromScale(1, 0.55),
+        BackgroundColor3 = Color3.new(1, 1, 1),
+        BorderSizePixel = 0,
+        ZIndex = zIndex,
+    }, parent)
+    Corner(sheen, radius)
+    New("UIGradient", { Rotation = 90, Transparency = NumberSequence.new(strength or 0.55, 1) }, sheen)
+    return sheen
+end
+
+-- A glass knob: a softly shaded white ring around a colour well, lifted by a small drop shadow. The stop
+-- handles and the hue thumb share it.
+local function paletteKnob(parent, size, zIndex)
+    local holder = New("Frame", {
+        Name = "Knob",
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(size, size),
+        BackgroundTransparency = 1,
+        ZIndex = zIndex,
+    }, parent)
+    local drop = Themed(New("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.new(0.5, 0, 0.5, 1.5),
+        Size = UDim2.fromOffset(size + 2, size + 2),
+        BackgroundTransparency = 0.6,
+        BorderSizePixel = 0,
+        ZIndex = zIndex,
+    }, holder), { BackgroundColor3 = "Shadow" })
+    Corner(drop, size)
+    local ring = New("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(size, size),
+        BackgroundColor3 = Color3.new(1, 1, 1),
+        BorderSizePixel = 0,
+        ZIndex = zIndex + 1,
+    }, holder)
+    Corner(ring, size)
+    New("UIGradient", { Rotation = 90, Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(214, 220, 232)) }, ring)
+    local well = New("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(size - 8, size - 8),
+        BorderSizePixel = 0,
+        ZIndex = zIndex + 2,
+    }, holder)
+    Corner(well, size)
+    New("UIStroke", { Color = Color3.new(0, 0, 0), Thickness = 1, Transparency = 0.8 }, well)
+    return holder, well
+end
+
 -- Opens the editor near `anchor`. `stops` is the working set (mutated); `onLive(sequence)` fires on every
 -- change; `onReset()` reseeds from the theme.
 local function openPaletteEditor(W, anchor, stops, onLive, onReset)
-    local selected = 1
-
     -- Derived rather than hardcoded so the panel stays consistent when a block is resized. The whole
     -- thing has to clear the 400px minimum window height, since a popup taller than the window would
     -- hang off the bottom no matter where it is anchored.
-    local BLOB_Y, BLOB_H = 36, 86
-    local RAMP_Y, RAMP_H = BLOB_Y + BLOB_H + 12, 24
-    local EDIT_Y = RAMP_Y + RAMP_H + 16
-    local SB = 104
-    local RIGHT_X = 14 + SB + 12
-    local RIGHT_W = PALETTE_WIDTH - 28 - SB - 12
-    local ACTION_Y = EDIT_Y + SB + 16
-    local FOOTER_Y = ACTION_Y + 26 + 8
-    local editorHeight = FOOTER_Y + 28 + 12
+    local PAD = 14
+    local INNER = PALETTE_WIDTH - PAD * 2
+    local HERO_Y, HERO_H = 40, 52
+    local TRACK_Y, TRACK_H = HERO_Y + HERO_H + 21, 16
+    local EDIT_Y = TRACK_Y + TRACK_H + 21
+    -- The track is inset by half a knob, so the end knobs line up with the edges of everything else.
+    local TRACK_X, TRACK_W = PAD + PALETTE_KNOB / 2, INNER - PALETTE_KNOB
+    local SB = 96
+    local RIGHT_X = PAD + SB + 14
+    local RIGHT_W = PALETTE_WIDTH - PAD - RIGHT_X
+    local POSITION_W = 76
+    local PRESET_LABEL_Y = EDIT_Y + SB + 14
+    local PRESET_Y, PRESET_H = PRESET_LABEL_Y + 16, 22
+    local FOOTER_Y, FOOTER_H = PRESET_Y + PRESET_H + 14, 30
+    local editorHeight = FOOTER_Y + FOOTER_H + 14
+
+    local selected = stops[1]
+    local render -- defined once every widget it touches exists
+    local put = PropertyCache()
+    local liveGradients = {} -- every UIGradient that shows the ramp being edited
+
+    local function live(parent, rotation)
+        local gradient = New("UIGradient", { Rotation = rotation or 0 }, parent)
+        table.insert(liveGradients, gradient)
+        return gradient
+    end
 
     local panel = New("Frame", { Name = "PalettePanel", Size = UDim2.fromOffset(PALETTE_WIDTH, 0), ClipsDescendants = true }, nil)
     PopupMaterial(panel, 14, 40)
@@ -124,9 +200,9 @@ local function openPaletteEditor(W, anchor, stops, onLive, onReset)
 
     Themed(Text(panel, {
         Text = "Gradient",
-        TextSize = 12,
-        Position = UDim2.fromOffset(14, 12),
-        Size = UDim2.new(1, -28, 0, 18),
+        TextSize = 13,
+        Position = UDim2.fromOffset(PAD, 12),
+        Size = UDim2.new(1, -150, 0, 18),
         ZIndex = 2,
     }), { TextColor3 = "TextPrimary" })
     local countLabel = Themed(Text(panel, {
@@ -135,112 +211,233 @@ local function openPaletteEditor(W, anchor, stops, onLive, onReset)
         TextSize = 11,
         TextXAlignment = Enum.TextXAlignment.Right,
         AnchorPoint = Vector2.new(1, 0),
-        Position = UDim2.new(1, -36, 0, 12),
-        Size = UDim2.fromOffset(140, 18),
+        Position = UDim2.new(1, -38, 0, 12),
+        Size = UDim2.fromOffset(130, 18),
         ZIndex = 2,
     }), { TextColor3 = "TextMuted" })
     PopupClose(panel, W)
 
     ---------------------------------------------------------------------------------------------------
-    -- The palette blob: the gradient washed across a painter's palette, with a dab per stop.
+    -- Preview: the ramp worn by a toggle, a slider, a checkbox and a meter, glowing in its own colours.
     ---------------------------------------------------------------------------------------------------
-    local blob = New("Frame", {
-        Position = UDim2.fromOffset(14, BLOB_Y),
-        Size = UDim2.fromOffset(PALETTE_WIDTH - 28, BLOB_H),
-        BackgroundColor3 = Color3.new(1, 1, 1),
-        BackgroundTransparency = 0.1,
-        BorderSizePixel = 0,
-        ZIndex = 2,
-    }, panel)
-    New("UICorner", { CornerRadius = UDim.new(0, 44) }, blob)
-    local blobWash = New("UIGradient", { Rotation = 12, Transparency = NumberSequence.new(0.4) }, blob)
-    Themed(New("UIStroke", { Thickness = 1, Transparency = 0.45 }, blob), { Color = "Rim" })
-    Specular(blob, 60, 0.45, 3)
-    local thumbHole = Themed(New("Frame", {
+    local HALO = 10
+    live(New("ImageLabel", {
+        Name = "Halo",
         AnchorPoint = Vector2.new(0.5, 0.5),
-        Position = UDim2.fromScale(0.87, 0.74),
-        Size = UDim2.fromOffset(28, 28),
+        Position = UDim2.fromOffset(PAD + INNER / 2, HERO_Y + HERO_H / 2),
+        Size = UDim2.fromOffset(INNER + HALO * 2, HERO_H + HALO * 2),
+        BackgroundTransparency = 1,
+        Image = Assets.GlassGlow,
+        ImageColor3 = Color3.new(1, 1, 1),
+        ImageTransparency = 0.45,
+        ScaleType = Enum.ScaleType.Slice,
+        SliceCenter = Rect.new(50, 50, 78, 78),
+        SliceScale = HALO / L.GlowRingInset,
+        ZIndex = 2,
+    }, panel))
+
+    local hero = Themed(New("Frame", {
+        Name = "Preview",
+        Position = UDim2.fromOffset(PAD, HERO_Y),
+        Size = UDim2.fromOffset(INNER, HERO_H),
+        BackgroundTransparency = 0.25,
         BorderSizePixel = 0,
         ZIndex = 3,
-    }, blob), { BackgroundColor3 = "PaneBottom" })
-    New("UICorner", { CornerRadius = UDim.new(0.5, 0) }, thumbHole)
-    Themed(New("UIStroke", { Thickness = 1, Transparency = 0.6 }, thumbHole), { Color = "Rim" })
-    local dabHolder = New("Frame", { BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), ZIndex = 4 }, blob)
+    }, panel), { BackgroundColor3 = "PaneBottom" })
+    Corner(hero, 12)
+    New("UIGradient", { Rotation = 90, Transparency = NumberSequence.new(0, 0.3) }, hero)
+    Themed(New("UIStroke", { ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Thickness = 1, Transparency = 0.7 }, hero), { Color = "Rim" })
+    Specular(hero, 48, 0.55, 9)
 
-    ---------------------------------------------------------------------------------------------------
-    -- The live ramp, with a draggable chip per stop sitting on it.
-    ---------------------------------------------------------------------------------------------------
-    local ramp = New("Frame", {
-        Position = UDim2.fromOffset(14, RAMP_Y),
-        Size = UDim2.fromOffset(PALETTE_WIDTH - 28, RAMP_H),
+    -- Toggle, switched on
+    local capsule = New("Frame", {
+        AnchorPoint = Vector2.new(0, 0.5),
+        Position = UDim2.new(0, 14, 0.5, 0),
+        Size = UDim2.fromOffset(40, 22),
         BackgroundColor3 = Color3.new(1, 1, 1),
         BorderSizePixel = 0,
-        ZIndex = 2,
-    }, panel)
-    Corner(ramp, 10)
-    local rampGradient = New("UIGradient", {}, ramp)
-    Themed(New("UIStroke", { Thickness = 1, Transparency = 0.55 }, ramp), { Color = "Rim" })
-    local chipHolder = New("Frame", {
+        ZIndex = 4,
+    }, hero)
+    Corner(capsule, 11)
+    live(capsule, 8)
+    paletteGloss(capsule, 11, 5)
+    local capsuleKnob = Themed(New("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.new(1, -11, 0.5, 0),
+        Size = UDim2.fromOffset(16, 16),
+        BorderSizePixel = 0,
+        ZIndex = 6,
+    }, capsule), { BackgroundColor3 = "Knob" })
+    Corner(capsuleKnob, 8)
+    Themed(New("UIStroke", { Thickness = 1, Transparency = 0.55 }, capsuleKnob), { Color = "Shadow" })
+
+    -- Slider, two-thirds full, with the glow pooled at its surface
+    local LEVEL, TUBE_W = 0.68, 122
+    local tube = New("Frame", {
+        AnchorPoint = Vector2.new(0, 0.5),
+        Position = UDim2.new(0, 70, 0.5, 0),
+        Size = UDim2.fromOffset(TUBE_W, 6),
+        ZIndex = 4,
+    }, hero)
+    FieldMaterial(tube, 3)
+    local tubeFill = New("Frame", {
+        Size = UDim2.fromScale(LEVEL, 1),
         BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(14, RAMP_Y - 5),
-        Size = UDim2.fromOffset(PALETTE_WIDTH - 28, RAMP_H + 10),
+        ClipsDescendants = true,
+        ZIndex = 5,
+    }, tube)
+    local tubeRamp = New("Frame", {
+        Size = UDim2.fromOffset(TUBE_W, 6),
+        BackgroundColor3 = Color3.new(1, 1, 1),
+        BorderSizePixel = 0,
+        ZIndex = 5,
+    }, tubeFill)
+    Corner(tubeRamp, 3)
+    live(tubeRamp)
+    local beadGlow = New("ImageLabel", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(LEVEL, 0.5),
+        Size = UDim2.fromOffset(32, 22),
+        BackgroundTransparency = 1,
+        Image = Assets.Spark,
+        ImageTransparency = 0.4,
+        ZIndex = 6,
+    }, tube)
+    local bead = Themed(New("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(LEVEL, 0.5),
+        Size = UDim2.fromOffset(13, 13),
+        BorderSizePixel = 0,
+        ZIndex = 7,
+    }, tube), { BackgroundColor3 = "Knob" })
+    Corner(bead, 7)
+    local beadRing = New("UIStroke", { Thickness = 1.5, Transparency = 0.05 }, bead)
+
+    -- Checkbox, ticked
+    local check = New("Frame", {
+        AnchorPoint = Vector2.new(0, 0.5),
+        Position = UDim2.new(0, 210, 0.5, 0),
+        Size = UDim2.fromOffset(20, 20),
+        BackgroundColor3 = Color3.new(1, 1, 1),
+        BorderSizePixel = 0,
+        ZIndex = 4,
+    }, hero)
+    Corner(check, 6)
+    live(check, 45)
+    local _, drawCheck = CheckGlyph(check, 5)
+    drawCheck(true, true)
+
+    -- Meter: bars coloured from across the ramp, left to right
+    local meterBars = {}
+    for i, height in ipairs({ 12, 22, 30, 18, 26 }) do
+        local bar = New("Frame", {
+            AnchorPoint = Vector2.new(0, 1),
+            Position = UDim2.new(0, 250 + (i - 1) * 14, 0.5, 15),
+            Size = UDim2.fromOffset(8, height),
+            BorderSizePixel = 0,
+            ZIndex = 4,
+        }, hero)
+        Corner(bar, 3)
+        paletteGloss(bar, 3, 5, 0.6)
+        meterBars[i] = bar
+    end
+
+    ---------------------------------------------------------------------------------------------------
+    -- The gradient track, with a glass knob riding it for every stop.
+    ---------------------------------------------------------------------------------------------------
+    local track = New("TextButton", {
+        Name = "Track",
+        Text = "",
+        AutoButtonColor = false,
+        Position = UDim2.fromOffset(TRACK_X, TRACK_Y),
+        Size = UDim2.fromOffset(TRACK_W, TRACK_H),
+        BackgroundColor3 = Color3.new(1, 1, 1),
+        BorderSizePixel = 0,
+        ZIndex = 3,
+    }, panel)
+    Corner(track, TRACK_H / 2)
+    live(track)
+    paletteGloss(track, TRACK_H / 2, 4, 0.6)
+    Themed(New("UIStroke", { ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Thickness = 1, Transparency = 0.5 }, track), { Color = "Rim" })
+    local knobLayer = New("Frame", {
+        Name = "Stops",
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(TRACK_X, TRACK_Y),
+        Size = UDim2.fromOffset(TRACK_W, TRACK_H),
         ZIndex = 6,
     }, panel)
 
     ---------------------------------------------------------------------------------------------------
-    -- Shade square, hue rail, hex field and presets for the selected stop.
+    -- Shade square, hue rail, hex and position fields, and the stop actions.
     ---------------------------------------------------------------------------------------------------
     local sb = New("Frame", {
-        Position = UDim2.fromOffset(14, EDIT_Y),
+        Position = UDim2.fromOffset(PAD, EDIT_Y),
         Size = UDim2.fromOffset(SB, SB),
         BorderSizePixel = 0,
-        ZIndex = 2,
+        ZIndex = 3,
     }, panel)
-    Corner(sb, 9)
-    local sbWhite = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ZIndex = 3 }, sb)
-    Corner(sbWhite, 9)
+    Corner(sb, 10)
+    local sbWhite = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ZIndex = 4 }, sb)
+    Corner(sbWhite, 10)
     New("UIGradient", { Transparency = NumberSequence.new(0, 1) }, sbWhite)
-    local sbBlack = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(0, 0, 0), BorderSizePixel = 0, ZIndex = 4 }, sb)
-    Corner(sbBlack, 9)
+    local sbBlack = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(0, 0, 0), BorderSizePixel = 0, ZIndex = 5 }, sb)
+    Corner(sbBlack, 10)
     New("UIGradient", { Rotation = 90, Transparency = NumberSequence.new(1, 0) }, sbBlack)
-    Themed(New("UIStroke", { Thickness = 1, Transparency = 0.6 }, sb), { Color = "Rim" })
+    Themed(New("UIStroke", { ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Thickness = 1, Transparency = 0.55 }, sb), { Color = "Rim" })
     local sbCursor = New("Frame", {
         AnchorPoint = Vector2.new(0.5, 0.5),
-        Size = UDim2.fromOffset(13, 13),
-        BackgroundTransparency = 1,
-        ZIndex = 6,
+        Size = UDim2.fromOffset(15, 15),
+        BorderSizePixel = 0,
+        ZIndex = 7,
     }, sb)
-    Corner(sbCursor, 7)
-    New("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 2 }, sbCursor)
-    New("UIStroke", { Color = Color3.new(0, 0, 0), Thickness = 1, Transparency = 0.65 }, sbCursor)
+    Corner(sbCursor, 8)
+    New("UIStroke", { ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Color = Color3.new(1, 1, 1), Thickness = 2.5 }, sbCursor)
+    local sbCursorShade = New("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(21, 21),
+        BackgroundTransparency = 1,
+        ZIndex = 7,
+    }, sbCursor)
+    Corner(sbCursorShade, 11)
+    New("UIStroke", { Color = Color3.new(0, 0, 0), Thickness = 1, Transparency = 0.55 }, sbCursorShade)
 
     local hueRail = New("Frame", {
-        Position = UDim2.fromOffset(RIGHT_X, EDIT_Y),
+        Position = UDim2.fromOffset(RIGHT_X, EDIT_Y + 1),
         Size = UDim2.fromOffset(RIGHT_W, 14),
         BackgroundColor3 = Color3.new(1, 1, 1),
         BorderSizePixel = 0,
-        ZIndex = 2,
+        ZIndex = 3,
     }, panel)
     Corner(hueRail, 7)
     New("UIGradient", { Color = hueSequence() }, hueRail)
-    local hueThumb = railThumb(hueRail)
+    Themed(New("UIStroke", { ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Thickness = 1, Transparency = 0.6 }, hueRail), { Color = "Rim" })
+    local hueThumb, hueWell = paletteKnob(hueRail, 18, 5)
 
-    -- Hex field: a swatch of the live colour next to an editable value.
-    local hexField = New("Frame", {
-        Position = UDim2.fromOffset(RIGHT_X, EDIT_Y + 24),
-        Size = UDim2.fromOffset(RIGHT_W, 26),
-        ZIndex = 2,
+    local ROW_Y = EDIT_Y + 26
+    local hexWell = New("Frame", {
+        Position = UDim2.fromOffset(RIGHT_X, ROW_Y),
+        Size = UDim2.fromOffset(RIGHT_W - POSITION_W - 6, 28),
+        ZIndex = 3,
     }, panel)
-    FieldMaterial(hexField, 7)
+    FieldMaterial(hexWell, 8)
     local hexSwatch = New("Frame", {
         AnchorPoint = Vector2.new(0, 0.5),
-        Position = UDim2.new(0, 6, 0.5, 0),
+        Position = UDim2.new(0, 8, 0.5, 0),
         Size = UDim2.fromOffset(14, 14),
         BorderSizePixel = 0,
-        ZIndex = 3,
-    }, hexField)
-    Corner(hexSwatch, 4)
-    Themed(New("UIStroke", { Thickness = 1, Transparency = 0.5 }, hexSwatch), { Color = "Rim" })
+        ZIndex = 4,
+    }, hexWell)
+    Corner(hexSwatch, 7)
+    Themed(New("UIStroke", { Thickness = 1, Transparency = 0.45 }, hexSwatch), { Color = "Rim" })
+    Themed(Text(hexWell, {
+        Text = "#",
+        FontFace = FONT_MONO,
+        TextSize = 12,
+        Position = UDim2.fromOffset(28, 0),
+        Size = UDim2.new(0, 10, 1, 0),
+        ZIndex = 4,
+    }), { TextColor3 = "TextMuted" })
     local hexBox = Themed(New("TextBox", {
         BackgroundTransparency = 1,
         ClearTextOnFocus = false,
@@ -248,317 +445,502 @@ local function openPaletteEditor(W, anchor, stops, onLive, onReset)
         Text = "",
         TextSize = 12,
         TextXAlignment = Enum.TextXAlignment.Left,
-        Position = UDim2.fromOffset(26, 0),
-        Size = UDim2.new(1, -32, 1, 0),
+        Position = UDim2.fromOffset(38, 0),
+        Size = UDim2.new(1, -44, 1, 0),
+        ZIndex = 4,
+    }, hexWell), { TextColor3 = "TextPrimary" })
+
+    local positionWell = New("Frame", {
+        Position = UDim2.fromOffset(RIGHT_X + RIGHT_W - POSITION_W, ROW_Y),
+        Size = UDim2.fromOffset(POSITION_W, 28),
         ZIndex = 3,
-    }, hexField), { TextColor3 = "TextPrimary" })
-
-    Themed(Text(panel, {
-        Text = "Presets",
-        FontFace = FONT_MEDIUM,
-        TextSize = 11,
-        Position = UDim2.fromOffset(RIGHT_X, EDIT_Y + 58),
-        Size = UDim2.fromOffset(RIGHT_W, 12),
-        ZIndex = 2,
+    }, panel)
+    FieldMaterial(positionWell, 8)
+    local positionBox = Themed(New("TextBox", {
+        BackgroundTransparency = 1,
+        ClearTextOnFocus = false,
+        FontFace = FONT_MONO,
+        Text = "",
+        TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        Position = UDim2.fromOffset(8, 0),
+        Size = UDim2.new(1, -26, 1, 0),
+        ZIndex = 4,
+    }, positionWell), { TextColor3 = "TextPrimary" })
+    Themed(Text(positionWell, {
+        Text = "%",
+        FontFace = FONT_MONO,
+        TextSize = 12,
+        AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.new(1, -8, 0, 0),
+        Size = UDim2.new(0, 10, 1, 0),
+        ZIndex = 4,
     }), { TextColor3 = "TextMuted" })
+    bindTooltip(W, positionWell, function() return "Where the selected stop sits along the ramp" end)
 
-    ---------------------------------------------------------------------------------------------------
-    -- Buttons
-    ---------------------------------------------------------------------------------------------------
-    local function smallButton(text, x, width, y, tone)
+    -- Segmented control: one etched well split into four glass keys.
+    local SEG_Y, SEG_H = EDIT_Y + SB - 30, 30
+    local segTrack = New("Frame", {
+        Position = UDim2.fromOffset(RIGHT_X, SEG_Y),
+        Size = UDim2.fromOffset(RIGHT_W, SEG_H),
+        ZIndex = 3,
+    }, panel)
+    FieldMaterial(segTrack, 9)
+    local SEG_W = (RIGHT_W - 6) / 4
+
+    local function segment(index, text, tone, tip, onClick)
+        local seg = { Enabled = true }
         local button = New("TextButton", {
+            Name = text,
             Text = "",
             AutoButtonColor = false,
-            Position = UDim2.fromOffset(x, y),
-            Size = UDim2.fromOffset(width, 26),
-            BackgroundColor3 = Color3.new(1, 1, 1),
-            BackgroundTransparency = 0.88,
+            BackgroundTransparency = 1,
+            Position = UDim2.fromOffset(3 + (index - 1) * SEG_W, 3),
+            Size = UDim2.fromOffset(SEG_W, SEG_H - 6),
+            ZIndex = 4,
+        }, segTrack)
+        local plate = Themed(New("Frame", {
+            Position = UDim2.fromOffset(1, 0),
+            Size = UDim2.new(1, -2, 1, 0),
+            BackgroundTransparency = 1,
             BorderSizePixel = 0,
-            ZIndex = 2,
-        }, panel)
-        Corner(button, 7)
-        Themed(button, { BackgroundColor3 = tone or "LensTint" })
-        local stroke = Themed(New("UIStroke", { Thickness = 1, Transparency = 0.6 }, button), { Color = tone or "Rim" })
-        local label = Themed(Text(button, {
+            ZIndex = 4,
+        }, button), { BackgroundColor3 = "LensTint" })
+        Corner(plate, 7)
+        local scale = New("UIScale", { Scale = 1 }, button)
+        seg.Label = Themed(Text(button, {
             Text = text,
             FontFace = FONT_MEDIUM,
-            TextSize = 12,
+            TextSize = 11,
             TextXAlignment = Enum.TextXAlignment.Center,
             Size = UDim2.fromScale(1, 1),
-            ZIndex = 3,
-        }), { TextColor3 = tone or "TextPrimary" })
+            ZIndex = 5,
+        }), { TextColor3 = tone })
+        if index > 1 then
+            Themed(New("Frame", {
+                AnchorPoint = Vector2.new(0.5, 0.5),
+                Position = UDim2.new(0, 0, 0.5, 0),
+                Size = UDim2.fromOffset(1, 12),
+                BackgroundTransparency = 0.8,
+                BorderSizePixel = 0,
+                ZIndex = 4,
+            }, button), { BackgroundColor3 = "Rim" })
+        end
         button.MouseEnter:Connect(function()
-            Tween(button, Motion.Hover, { BackgroundTransparency = 0.76 })
+            if not seg.Enabled then return end
+            Tween(plate, Motion.Hover, { BackgroundTransparency = 0.86 })
             playSound("Hover")
         end)
-        button.MouseLeave:Connect(function() Tween(button, Motion.Hover, { BackgroundTransparency = 0.88 }) end)
-        return button, label, stroke
-    end
-
-    local actionWidth = (PALETTE_WIDTH - 28 - 12) / 3
-    local addButton = smallButton("+ Stop", 14, actionWidth, ACTION_Y)
-    local removeButton, removeLabel = smallButton("Remove", 14 + actionWidth + 6, actionWidth, ACTION_Y)
-    local reverseButton = smallButton("Reverse", 14 + (actionWidth + 6) * 2, actionWidth, ACTION_Y)
-    Themed(removeLabel, { TextColor3 = "Danger" })
-    local resetButton = smallButton("Reset to theme", 14, 124, FOOTER_Y)
-    local applyButton, applyLabel = smallButton("Done", 146, PALETTE_WIDTH - 28 - 132, FOOTER_Y, "Accent")
-    Themed(applyLabel, { TextColor3 = "Knob" })
-
-    ---------------------------------------------------------------------------------------------------
-    -- Rendering
-    ---------------------------------------------------------------------------------------------------
-    local render
-    local dabs, chips = {}, {}
-
-    local function selectStop(index)
-        selected = math.clamp(index, 1, #stops)
-        playSound("Press")
-        render()
-    end
-
-    local function removeStop(index)
-        if index == 1 or index == #stops or #stops <= 2 then return end
-        table.remove(stops, index)
-        selected = math.max(1, index - 1)
-        playSound("Close")
-        render(true)
-    end
-
-    -- One dab on the blob and one chip on the ramp per stop; both are rebuilt when the set changes.
-    local function rebuildStops()
-        for _, dab in ipairs(dabs) do dab.Frame:Destroy() end
-        for _, chip in ipairs(chips) do chip.Frame:Destroy() end
-        table.clear(dabs)
-        table.clear(chips)
-
-        for i, stop in ipairs(stops) do
-            local index = i
-            local t = stop.position
-
-            -- Dab: sits along a gentle arc across the palette, ordered by position.
-            local dab = New("TextButton", {
-                Name = "Dab" .. i,
-                Text = "",
-                AutoButtonColor = false,
-                AnchorPoint = Vector2.new(0.5, 0.5),
-                Position = UDim2.new(0.09 + t * 0.62, 0, 0.46 + math.sin(t * math.pi) * -0.16, 0),
-                Size = UDim2.fromOffset(30, 30),
-                BackgroundColor3 = stop.color,
-                BorderSizePixel = 0,
-                ZIndex = 5,
-            }, dabHolder)
-            New("UICorner", { CornerRadius = UDim.new(0.5, 0) }, dab)
-            local gloss = New("Frame", { Size = UDim2.new(1, 0, 0.55, 0), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ZIndex = 6 }, dab)
-            New("UICorner", { CornerRadius = UDim.new(0.5, 0) }, gloss)
-            New("UIGradient", { Rotation = 90, Transparency = NumberSequence.new(0.45, 1) }, gloss)
-            local dabRing = New("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 1, Transparency = 0.5 }, dab)
-            local dabScale = New("UIScale", { Scale = 1 }, dab)
-            dab.MouseEnter:Connect(function() Tween(dabScale, Motion.Pop, { Scale = 1.12 }) end)
-            dab.MouseLeave:Connect(function() Tween(dabScale, Motion.Pop, { Scale = index == selected and 1.08 or 1 }) end)
-            dab.MouseButton1Click:Connect(function() selectStop(index) end)
-            dab.MouseButton2Click:Connect(function() removeStop(index) end)
-            dabs[i] = { Frame = dab, Ring = dabRing, Scale = dabScale }
-
-            -- Chip: the same stop, sitting on the ramp where it actually lands.
-            local chip = New("TextButton", {
-                Name = "Chip" .. i,
-                Text = "",
-                AutoButtonColor = false,
-                AnchorPoint = Vector2.new(0.5, 0.5),
-                Position = UDim2.new(t, 0, 0.5, 0),
-                Size = UDim2.fromOffset(16, RAMP_H + 8),
-                BackgroundColor3 = stop.color,
-                BorderSizePixel = 0,
-                ZIndex = 7,
-            }, chipHolder)
-            Corner(chip, 6)
-            local chipRing = New("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 1.5, Transparency = 0.35 }, chip)
-            New("UIStroke", { Color = Color3.new(0, 0, 0), Thickness = 1, Transparency = 0.7 }, chip)
-            chips[i] = { Frame = chip, Ring = chipRing }
-
-            chip.MouseButton2Click:Connect(function() removeStop(index) end)
-            -- Endpoints can be selected and recoloured but never moved.
-            chip.InputBegan:Connect(function(input)
-                if not isPointer(input) then return end
-                selectStop(index)
-                if index == 1 or index == #stops then return end
-                local moveConnection, endConnection
-                moveConnection = UserInputService.InputChanged:Connect(function(changed)
-                    if not isMove(changed) then return end
-                    local left = chipHolder.AbsolutePosition.X
-                    local width = chipHolder.AbsoluteSize.X
-                    if width <= 0 then return end
-                    local pct = math.clamp((changed.Position.X - left) / width, 0.03, 0.97)
-                    local mine = stops[selected]
-                    if not mine then return end
-                    mine.position = pct
-                    table.sort(stops, function(a, b) return a.position < b.position end)
-                    selected = table.find(stops, mine) or selected
-                    playSound("Tick")
-                    render()
-                end)
-                endConnection = input.Changed:Connect(function()
-                    if input.UserInputState ~= Enum.UserInputState.End then return end
-                    moveConnection:Disconnect()
-                    endConnection:Disconnect()
-                    render(true) -- re-seat the dabs and chips in their new order
-                end)
-            end)
-        end
-    end
-
-    local hexFocused = false
-    hexBox.Focused:Connect(function() hexFocused = true end)
-    hexBox.FocusLost:Connect(function()
-        hexFocused = false
-        local color = fromHex(hexBox.Text)
-        if color then
-            stops[selected].color = color
-            playSound("Press")
-        end
-        render()
-    end)
-
-    function render(rebuild)
-        selected = math.clamp(selected, 1, #stops)
-        if rebuild then rebuildStops() end
-
-        local sequence = stopsToSequence(stops)
-        rampGradient.Color = sequence
-        blobWash.Color = sequence
-
-        for i, stop in ipairs(stops) do
-            local dab, chip = dabs[i], chips[i]
-            if dab then
-                dab.Frame.BackgroundColor3 = stop.color
-                dab.Frame.Position = UDim2.new(0.09 + stop.position * 0.62, 0, 0.46 + math.sin(stop.position * math.pi) * -0.16, 0)
-                dab.Ring.Thickness = i == selected and 2.5 or 1
-                dab.Ring.Transparency = i == selected and 0 or 0.5
-                dab.Scale.Scale = i == selected and 1.08 or 1
-            end
-            if chip then
-                chip.Frame.BackgroundColor3 = stop.color
-                chip.Frame.Position = UDim2.new(stop.position, 0, 0.5, 0)
-                chip.Ring.Thickness = i == selected and 2.5 or 1.5
-                chip.Ring.Transparency = i == selected and 0 or 0.35
-            end
-        end
-
-        local stop = stops[selected]
-        local hue, sat, val = stop.color:ToHSV()
-        sb.BackgroundColor3 = Color3.fromHSV(hue, 1, 1)
-        sbCursor.Position = UDim2.fromScale(sat, 1 - val)
-        hueThumb.Position = UDim2.fromScale(hue, 0.5)
-        hexSwatch.BackgroundColor3 = stop.color
-        if not hexFocused then hexBox.Text = toHex(stop.color) end
-
-        local endpoint = selected == 1 or selected == #stops
-        removeButton.Visible = not endpoint and #stops > 2
-        addButton.Visible = #stops < PALETTE_MAX_STOPS
-        countLabel.Text = string.format("%d stop%s · stop %d", #stops, #stops == 1 and "" or "s", selected)
-        onLive(sequence)
-    end
-
-    ---------------------------------------------------------------------------------------------------
-    -- Presets
-    ---------------------------------------------------------------------------------------------------
-    local PRESET_W, PRESET_H, PRESET_GAP = (RIGHT_W - 12) / 3, 20, 6
-    for i, preset in ipairs(PALETTE_PRESETS) do
-        local column, row = (i - 1) % 3, math.floor((i - 1) / 3)
-        local swatch = New("TextButton", {
-            Name = preset.Name,
-            Text = "",
-            AutoButtonColor = false,
-            Position = UDim2.fromOffset(RIGHT_X + column * (PRESET_W + PRESET_GAP), EDIT_Y + 74 + row * (PRESET_H + PRESET_GAP)),
-            Size = UDim2.fromOffset(PRESET_W, PRESET_H),
-            BackgroundColor3 = Color3.new(1, 1, 1),
-            BorderSizePixel = 0,
-            ZIndex = 2,
-        }, panel)
-        Corner(swatch, 6)
-        New("UIGradient", { Color = presetSequence(preset.Colors) }, swatch)
-        Themed(New("UIStroke", { Thickness = 1, Transparency = 0.6 }, swatch), { Color = "Rim" })
-        local swatchScale = New("UIScale", { Scale = 1 }, swatch)
-        swatch.MouseEnter:Connect(function()
-            Tween(swatchScale, Motion.Pop, { Scale = 1.07 })
-            playSound("Hover")
+        button.MouseLeave:Connect(function()
+            Tween(plate, Motion.Hover, { BackgroundTransparency = 1 })
+            Tween(scale, Motion.Pop, { Scale = 1 })
         end)
-        swatch.MouseLeave:Connect(function() Tween(swatchScale, Motion.Pop, { Scale = 1 }) end)
-        swatch.MouseButton1Click:Connect(function()
-            for index = #stops, 1, -1 do stops[index] = nil end
-            for index, color in ipairs(preset.Colors) do
-                table.insert(stops, { color = color, position = (index - 1) / math.max(1, #preset.Colors - 1) })
-            end
-            selected = 1
-            playSound("Open")
-            render(true)
+        button.MouseButton1Down:Connect(function()
+            if seg.Enabled then Tween(scale, Motion.Press, { Scale = 0.94 }) end
         end)
+        button.MouseButton1Up:Connect(function() Tween(scale, Motion.Pop, { Scale = 1 }) end)
+        button.MouseButton1Click:Connect(function()
+            if seg.Enabled then onClick() end
+        end)
+        bindTooltip(W, button, function() return tip end)
+        seg.Plate = plate
+        return seg
+    end
+
+    local function setEnabled(seg, enabled)
+        if seg.Enabled == enabled then return end
+        seg.Enabled = enabled
+        seg.Label.TextTransparency = enabled and 0 or 0.6
+        if not enabled then seg.Plate.BackgroundTransparency = 1 end
     end
 
     ---------------------------------------------------------------------------------------------------
     -- Editing
     ---------------------------------------------------------------------------------------------------
-    local function editSelectedHSV(hue, sat, val)
-        stops[selected].color = Color3.fromHSV(hue, sat, val)
+    local function sortStops()
+        table.sort(stops, function(a, b) return a.position < b.position end)
+        stops[1].position, stops[#stops].position = 0, 1
+    end
+
+    local function isEndpoint(stop)
+        return stop == stops[1] or stop == stops[#stops]
+    end
+
+    -- The ramp's colour at `t`, sampled from the stops themselves.
+    local function colorAt(t)
+        for i = 1, #stops - 1 do
+            local a, b = stops[i], stops[i + 1]
+            if t <= b.position then
+                local span = b.position - a.position
+                return a.color:Lerp(b.color, if span > 0 then math.clamp((t - a.position) / span, 0, 1) else 0)
+            end
+        end
+        return stops[#stops].color
+    end
+
+    local function selectStop(stop)
+        if selected == stop then return end
+        selected = stop
+        playSound("Press")
         render()
     end
-    trackPointer(sb, function(x, y)
-        local hue = select(1, stops[selected].color:ToHSV())
-        editSelectedHSV(hue, x, 1 - y)
-    end)
-    trackPointer(hueRail, function(x)
-        local _, sat, val = stops[selected].color:ToHSV()
-        editSelectedHSV(x, sat, val)
-    end)
 
-    addButton.MouseButton1Click:Connect(function()
+    local function addStopAt(position)
         if #stops >= PALETTE_MAX_STOPS then return end
-        -- Insert into the widest gap, coloured by sampling the ramp right there.
-        table.sort(stops, function(a, b) return a.position < b.position end)
+        sortStops()
+        local fresh = { color = colorAt(position), position = position }
+        table.insert(stops, fresh)
+        selected = fresh
+        playSound("Open")
+        render(true)
+    end
+
+    -- Into the widest gap, coloured by sampling the ramp right there.
+    local function addStop()
+        sortStops()
         local gapAt, gapSize = 0.5, -1
         for i = 1, #stops - 1 do
             local size = stops[i + 1].position - stops[i].position
             if size > gapSize then gapSize, gapAt = size, (stops[i].position + stops[i + 1].position) / 2 end
         end
-        local blended = stops[1].color
-        for i = 1, #stops - 1 do
-            if gapAt >= stops[i].position and gapAt <= stops[i + 1].position then
-                local span = stops[i + 1].position - stops[i].position
-                blended = stops[i].color:Lerp(stops[i + 1].color, span > 0 and (gapAt - stops[i].position) / span or 0.5)
-                break
-            end
-        end
-        local fresh = { color = blended, position = gapAt }
-        table.insert(stops, fresh)
-        table.sort(stops, function(a, b) return a.position < b.position end)
-        selected = table.find(stops, fresh) or selected
-        playSound("Open")
-        render(true)
-    end)
-    removeButton.MouseButton1Click:Connect(function() removeStop(selected) end)
-    reverseButton.MouseButton1Click:Connect(function()
-        table.sort(stops, function(a, b) return a.position < b.position end)
-        local colors = {}
-        for i, stop in ipairs(stops) do colors[i] = stop.color end
-        for i, stop in ipairs(stops) do
-            stop.color = colors[#colors - i + 1]
-            stop.position = 1 - stops[#stops - i + 1].position
-        end
-        table.sort(stops, function(a, b) return a.position < b.position end)
-        playSound("Tab")
-        render(true)
-    end)
-    resetButton.MouseButton1Click:Connect(function()
-        local fresh = onReset()
-        for i = #stops, 1, -1 do stops[i] = nil end
-        for _, stop in ipairs(fresh) do table.insert(stops, stop) end
-        selected = 1
+        addStopAt(gapAt)
+    end
+
+    local function removeStop(stop)
+        if #stops <= 2 or isEndpoint(stop) then return end
+        local index = table.find(stops, stop)
+        if not index then return end
+        table.remove(stops, index)
+        selected = stops[math.max(1, index - 1)]
         playSound("Close")
         render(true)
-    end)
-    applyButton.MouseButton1Click:Connect(function() W:ClosePopup() end)
+    end
 
-    render(true)
+    -- Mirror the ramp end to end. The selection follows its colour to the other side.
+    local function flip()
+        sortStops()
+        local count = #stops
+        local mirrored = count - table.find(stops, selected) + 1
+        local colors, positions = {}, {}
+        for i = 1, count do
+            colors[i] = stops[count - i + 1].color
+            positions[i] = 1 - stops[count - i + 1].position
+        end
+        for i, stop in ipairs(stops) do
+            stop.color, stop.position, stop.hue = colors[i], positions[i], nil
+        end
+        selected = stops[mirrored]
+        playSound("Tab")
+        render()
+    end
+
+    local function spaceEvenly()
+        sortStops()
+        for i, stop in ipairs(stops) do stop.position = (i - 1) / (#stops - 1) end
+        playSound("Tab")
+        render()
+    end
+
+    local function replaceStops(fresh, quiet)
+        for i = #stops, 1, -1 do stops[i] = nil end
+        for _, stop in ipairs(fresh) do table.insert(stops, stop) end
+        selected = stops[1]
+        render(true, quiet)
+    end
+
+    local addSeg = segment(1, "Add", "TextPrimary", "Add a stop in the widest gap", addStop)
+    local removeSeg = segment(2, "Remove", "Danger", "Remove the selected stop", function() removeStop(selected) end)
+    segment(3, "Flip", "TextPrimary", "Mirror the gradient end to end", flip)
+    local evenSeg = segment(4, "Even", "TextPrimary", "Space the stops out evenly", spaceEvenly)
+
+    -- The colour is edited in HSV. Each stop remembers its hue, so dragging the shade cursor into the grey
+    -- column or down to black (where a colour has no hue left) doesn't snap the hue rail back to red.
+    trackPointer(sb, function(x, y)
+        local hue = selected.hue or select(1, selected.color:ToHSV())
+        selected.hue = hue
+        selected.color = Color3.fromHSV(hue, x, 1 - y)
+        render()
+    end)
+    trackPointer(hueRail, function(x)
+        local _, sat, val = selected.color:ToHSV()
+        selected.hue = x
+        selected.color = Color3.fromHSV(x, sat, val)
+        render()
+    end)
+
+    local hexFocused, positionFocused = false, false
+    hexBox.Focused:Connect(function() hexFocused = true end)
+    hexBox.FocusLost:Connect(function()
+        hexFocused = false
+        local color = fromHex(hexBox.Text)
+        if color then
+            selected.color, selected.hue = color, nil
+            playSound("Press")
+        end
+        render()
+    end)
+    positionBox.Focused:Connect(function() positionFocused = true end)
+    positionBox.FocusLost:Connect(function()
+        positionFocused = false
+        local value = tonumber((positionBox.Text:gsub("%%", "")))
+        if value and not isEndpoint(selected) then
+            selected.position = math.clamp(value / 100, 0.02, 0.98)
+            playSound("Press")
+        end
+        render()
+    end)
+
+    -- Clicking bare track drops a new stop right there.
+    track.InputBegan:Connect(function(input)
+        if not isPointer(input) then return end
+        local left, width = track.AbsolutePosition.X, track.AbsoluteSize.X
+        if width <= 0 then return end
+        addStopAt(math.clamp((input.Position.X - left) / width, 0.02, 0.98))
+    end)
+
+    ---------------------------------------------------------------------------------------------------
+    -- Stop knobs. Each belongs to a stop rather than to an index, so a knob dragged past its neighbour
+    -- keeps its own colour and selection while the stops re-sort around it.
+    ---------------------------------------------------------------------------------------------------
+    local knobs = {} -- stop -> knob
+
+    local function paintKnob(knob)
+        local on, hovered = knob.Stop == selected, knob.Hovered
+        if knob.On == on and knob.WasHovered == hovered then return end
+        knob.On, knob.WasHovered = on, hovered
+        Tween(knob.Scale, Motion.Pop, { Scale = (on and 1.12 or 1) + (hovered and 0.06 or 0) })
+        Tween(knob.Glow, Motion.Hover, { BackgroundTransparency = on and 0.55 or 1 })
+        knob.Button.ZIndex = on and 7 or 6
+    end
+
+    local function buildKnob(stop)
+        local button = New("TextButton", {
+            Name = "Stop",
+            Text = "",
+            AutoButtonColor = false,
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.new(stop.position, 0, 0.5, 0),
+            Size = UDim2.fromOffset(PALETTE_KNOB + 6, PALETTE_KNOB + 6),
+            BackgroundTransparency = 1,
+            ZIndex = 6,
+        }, knobLayer)
+        local scale = New("UIScale", { Scale = 1 }, button)
+        -- The selection halo glows in the stop's own colour (set in render), not the theme accent, which
+        -- would clash with whatever ramp is being built.
+        local glow = New("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.fromScale(0.5, 0.5),
+            Size = UDim2.fromOffset(PALETTE_KNOB + 10, PALETTE_KNOB + 10),
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            ZIndex = 6,
+        }, button)
+        Corner(glow, PALETTE_KNOB)
+        local _, well = paletteKnob(button, PALETTE_KNOB, 7)
+        local knob = { Stop = stop, Button = button, Scale = scale, Glow = glow, Well = well, Hovered = false }
+
+        button.MouseEnter:Connect(function()
+            knob.Hovered = true
+            paintKnob(knob)
+            playSound("Hover")
+        end)
+        button.MouseLeave:Connect(function()
+            knob.Hovered = false
+            paintKnob(knob)
+        end)
+        button.MouseButton2Click:Connect(function() removeStop(stop) end)
+        button.InputBegan:Connect(function(input)
+            if not isPointer(input) then return end
+            selectStop(stop)
+            if isEndpoint(stop) then return end -- endpoints can be recoloured but never moved
+            local moveConnection, endConnection
+            moveConnection = UserInputService.InputChanged:Connect(function(changed)
+                if not isMove(changed) then return end
+                local left, width = track.AbsolutePosition.X, track.AbsoluteSize.X
+                if width <= 0 or not table.find(stops, stop) then return end
+                stop.position = math.clamp((changed.Position.X - left) / width, 0.02, 0.98)
+                playSound("Tick")
+                render()
+            end)
+            endConnection = input.Changed:Connect(function()
+                if input.UserInputState ~= Enum.UserInputState.End then return end
+                moveConnection:Disconnect()
+                endConnection:Disconnect()
+            end)
+        end)
+        knobs[stop] = knob
+        return knob
+    end
+
+    -- Knobs for stops that are gone are dropped, and stops that are new get one.
+    local function syncKnobs()
+        local present = {}
+        for _, stop in ipairs(stops) do
+            present[stop] = true
+            if not knobs[stop] then buildKnob(stop) end
+        end
+        for stop, knob in pairs(knobs) do
+            if not present[stop] then
+                knob.Button:Destroy()
+                knobs[stop] = nil
+            end
+        end
+    end
+
+    ---------------------------------------------------------------------------------------------------
+    -- Rendering
+    ---------------------------------------------------------------------------------------------------
+    -- `quiet` draws without handing the ramp to onLive: opening the editor, or resetting to the theme,
+    -- changes nothing yet, and pushing the theme's own colours back as a custom ramp would stop the UI
+    -- following the theme.
+    function render(restructured, quiet)
+        sortStops()
+        if not table.find(stops, selected) then selected = stops[1] end
+        if restructured then syncKnobs() end
+
+        local sequence = stopsToSequence(stops)
+        for _, gradient in ipairs(liveGradients) do gradient.Color = sequence end
+        for i, bar in ipairs(meterBars) do
+            put(bar, "BackgroundColor3", colorAt((i - 1) / (#meterBars - 1)))
+        end
+        local surface = colorAt(LEVEL)
+        put(beadRing, "Color", surface)
+        put(beadGlow, "ImageColor3", surface)
+
+        for stop, knob in pairs(knobs) do
+            put(knob.Button, "Position", UDim2.new(stop.position, 0, 0.5, 0))
+            put(knob.Well, "BackgroundColor3", stop.color)
+            put(knob.Glow, "BackgroundColor3", stop.color)
+            paintKnob(knob)
+        end
+
+        local hue, sat, val = selected.color:ToHSV()
+        if sat > 0.001 and val > 0.001 and not selected.hue then selected.hue = hue end
+        hue = selected.hue or hue
+        put(sb, "BackgroundColor3", Color3.fromHSV(hue, 1, 1))
+        put(sbCursor, "Position", UDim2.fromScale(sat, 1 - val))
+        put(sbCursor, "BackgroundColor3", selected.color)
+        put(hueThumb, "Position", UDim2.fromScale(hue, 0.5))
+        put(hueWell, "BackgroundColor3", Color3.fromHSV(hue, 1, 1))
+        put(hexSwatch, "BackgroundColor3", selected.color)
+        -- The text fields are written straight through: the person typing in them changes their Text too.
+        if not hexFocused then hexBox.Text = toHex(selected.color) end
+        local endpoint = isEndpoint(selected)
+        if not positionFocused then positionBox.Text = tostring(math.floor(selected.position * 100 + 0.5)) end
+        put(positionBox, "TextEditable", not endpoint)
+        put(positionBox, "TextTransparency", endpoint and 0.5 or 0)
+
+        put(countLabel, "Text", string.format("Stop %d of %d", table.find(stops, selected), #stops))
+        setEnabled(addSeg, #stops < PALETTE_MAX_STOPS)
+        setEnabled(removeSeg, not endpoint and #stops > 2)
+        setEnabled(evenSeg, #stops > 2)
+        if not quiet then onLive(sequence) end
+    end
+
+    ---------------------------------------------------------------------------------------------------
+    -- Presets
+    ---------------------------------------------------------------------------------------------------
+    Themed(Text(panel, {
+        Text = "PRESETS",
+        TextSize = 10,
+        Position = UDim2.fromOffset(PAD, PRESET_LABEL_Y),
+        Size = UDim2.fromOffset(INNER, 12),
+        ZIndex = 2,
+    }), { TextColor3 = "TextMuted" })
+    local presetW = (INNER - (#PALETTE_PRESETS - 1) * 6) / #PALETTE_PRESETS
+    for i, preset in ipairs(PALETTE_PRESETS) do
+        local pill = New("TextButton", {
+            Name = preset.Name,
+            Text = "",
+            AutoButtonColor = false,
+            Position = UDim2.fromOffset(PAD + (i - 1) * (presetW + 6), PRESET_Y),
+            Size = UDim2.fromOffset(presetW, PRESET_H),
+            BackgroundColor3 = Color3.new(1, 1, 1),
+            BorderSizePixel = 0,
+            ZIndex = 3,
+        }, panel)
+        Corner(pill, PRESET_H / 2)
+        New("UIGradient", { Color = presetSequence(preset.Colors) }, pill)
+        paletteGloss(pill, PRESET_H / 2, 4, 0.6)
+        Themed(New("UIStroke", { ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Thickness = 1, Transparency = 0.6 }, pill), { Color = "Rim" })
+        local pillScale = New("UIScale", { Scale = 1 }, pill)
+        pill.MouseEnter:Connect(function()
+            Tween(pillScale, Motion.Pop, { Scale = 1.08 })
+            playSound("Hover")
+        end)
+        pill.MouseLeave:Connect(function() Tween(pillScale, Motion.Pop, { Scale = 1 }) end)
+        pill.MouseButton1Click:Connect(function()
+            local fresh = {}
+            for index, color in ipairs(preset.Colors) do
+                table.insert(fresh, { color = color, position = (index - 1) / math.max(1, #preset.Colors - 1) })
+            end
+            playSound("Open")
+            replaceStops(fresh)
+        end)
+        bindTooltip(W, pill, function() return preset.Name end)
+    end
+
+    ---------------------------------------------------------------------------------------------------
+    -- Footer: a quiet reset, and Done with a rim lit by the gradient itself.
+    ---------------------------------------------------------------------------------------------------
+    local function footerButton(text, x, width, lit, onClick)
+        local button = New("TextButton", {
+            Name = text,
+            Text = "",
+            AutoButtonColor = false,
+            Position = UDim2.fromOffset(x, FOOTER_Y),
+            Size = UDim2.fromOffset(width, FOOTER_H),
+            BackgroundTransparency = 0.9,
+            BorderSizePixel = 0,
+            ZIndex = 3,
+        }, panel)
+        Themed(button, { BackgroundColor3 = "LensTint" })
+        Corner(button, 9)
+        New("UIGradient", { Rotation = 90, Transparency = NumberSequence.new(0, 0.5) }, button)
+        local stroke = New("UIStroke", {
+            ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+            Thickness = lit and 1.5 or 1,
+            Transparency = lit and 0.05 or 0.6,
+        }, button)
+        if lit then
+            stroke.Color = Color3.new(1, 1, 1)
+            live(stroke)
+        else
+            Themed(stroke, { Color = "Rim" })
+        end
+        Specular(button, 18, 0.55, 4)
+        Themed(Text(button, {
+            Text = text,
+            FontFace = lit and FONT_BOLD or FONT_MEDIUM,
+            TextSize = 12,
+            TextXAlignment = Enum.TextXAlignment.Center,
+            Size = UDim2.fromScale(1, 1),
+            ZIndex = 5,
+        }), { TextColor3 = lit and "TextPrimary" or "TextSecondary" })
+        local scale = New("UIScale", { Scale = 1 }, button)
+        button.MouseEnter:Connect(function()
+            Tween(button, Motion.Hover, { BackgroundTransparency = 0.78 })
+            Tween(scale, Motion.Pop, { Scale = 1.02 })
+            playSound("Hover")
+        end)
+        button.MouseLeave:Connect(function()
+            Tween(button, Motion.Hover, { BackgroundTransparency = 0.9 })
+            Tween(scale, Motion.Pop, { Scale = 1 })
+        end)
+        button.MouseButton1Down:Connect(function() Tween(scale, Motion.Press, { Scale = 0.97 }) end)
+        button.MouseButton1Up:Connect(function() Tween(scale, Motion.Pop, { Scale = 1.02 }) end)
+        button.MouseButton1Click:Connect(onClick)
+        return button
+    end
+
+    local RESET_W = 124
+    footerButton("Reset to theme", PAD, RESET_W, false, function()
+        playSound("Close")
+        replaceStops(onReset(), true)
+    end)
+    footerButton("Done", PAD + RESET_W + 8, INNER - RESET_W - 8, true, function() W:ClosePopup() end)
+
+    render(true, true)
     playSound("Open")
     W:OpenPopup(panel, function()
         playSound("Close")
@@ -571,10 +953,27 @@ end
 -------------------------------------------------------------------------------------------------------
 -- AddPalette element: the accent ramp itself is the button that opens the editor.
 -------------------------------------------------------------------------------------------------------
+-- Stop times of the live accent ramp, rebuilt only when the ramp itself is replaced. The element's stop
+-- markers are bound to the theme registry, so this is asked for on every repaint.
+local accentTimesFor, accentTimes = false, nil
+local function accentStopTimes()
+    local custom = Library.AccentGradient
+    if custom ~= accentTimesFor or not accentTimes then
+        accentTimesFor = custom
+        accentTimes = { 0, 1 }
+        if custom then
+            accentTimes = {}
+            for i, keypoint in ipairs(custom.Keypoints) do accentTimes[i] = keypoint.Time end
+        end
+    end
+    return accentTimes
+end
+
 function Container:AddPalette(idx, info)
     info = info or {}
     local W = self.W
     local Palette = { Type = "Palette", Text = info.Text or "Accent Gradient" }
+    local RAMP_H = 22
 
     local holder = New("Frame", {
         Name = "Palette",
@@ -586,8 +985,23 @@ function Container:AddPalette(idx, info)
         Text = Palette.Text,
         FontFace = FONT_MEDIUM,
         TextSize = 13,
-        Size = UDim2.new(1, 0, 0, 18),
+        Size = UDim2.new(1, -96, 0, 18),
     }), { TextColor3 = "TextSecondary" })
+    -- What the ramp follows right now: the theme's own accent, or a custom ramp of so many stops.
+    Themed(Text(holder, {
+        FontFace = FONT_MEDIUM,
+        TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.new(1, 0, 0, 0),
+        Size = UDim2.fromOffset(96, 18),
+    }), {
+        TextColor3 = "TextMuted",
+        Text = function()
+            local custom = Library.AccentGradient
+            return if custom then string.format("%d stops", #custom.Keypoints) else "Theme accent"
+        end,
+    })
 
     local ramp = New("TextButton", {
         Name = "Ramp",
@@ -595,38 +1009,68 @@ function Container:AddPalette(idx, info)
         AutoButtonColor = false,
         AnchorPoint = Vector2.new(0, 1),
         Position = UDim2.new(0, 0, 1, 0),
-        Size = UDim2.new(1, 0, 0, 20),
+        Size = UDim2.new(1, 0, 0, RAMP_H),
         BackgroundColor3 = Color3.new(1, 1, 1),
         BorderSizePixel = 0,
         ZIndex = 2,
     }, holder)
-    Corner(ramp, 10)
+    Corner(ramp, RAMP_H / 2)
     Themed(New("UIGradient", {}, ramp), { Color = accentSequence })
-    local rampRim = Themed(New("UIStroke", { Thickness = 1, Transparency = 0.6 }, ramp), { Color = "Rim" })
-    Specular(ramp, 24, 0.45, 3)
+    paletteGloss(ramp, RAMP_H / 2, 3, 0.5)
+    local rampRim = Themed(New("UIStroke", {
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+        Thickness = 1,
+        Transparency = 0.6,
+    }, ramp), { Color = "Rim" })
+    Specular(ramp, 24, 0.45, 4)
     local rampScale = New("UIScale", { Scale = 1 }, ramp)
 
-    -- Three dabs at the right end: the only hint that the ramp is a door into the palette.
-    for i = 0, 2 do
-        local dab = Themed(New("Frame", {
-            AnchorPoint = Vector2.new(1, 0.5),
-            Position = UDim2.new(1, -8 - i * 8, 0.5, 0),
-            Size = UDim2.fromOffset(5, 5),
-            BackgroundTransparency = 0.25,
+    -- A marker for every stop between the ends, so a custom ramp shows its shape at a glance. Inset by the
+    -- cap radius so the markers stay on the straight part of the pill.
+    for i = 1, PALETTE_MAX_STOPS - 2 do
+        local marker = Themed(New("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Size = UDim2.fromOffset(6, 6),
+            BackgroundColor3 = Color3.new(1, 1, 1),
             BorderSizePixel = 0,
-            ZIndex = 3,
-        }, ramp), { BackgroundColor3 = "Knob" })
-        Corner(dab, 3)
+            ZIndex = 5,
+        }, ramp), {
+            Visible = function() return i + 1 < #accentStopTimes() end,
+            Position = function()
+                local t = accentStopTimes()[i + 1] or 0
+                return UDim2.new(t, (RAMP_H / 2) * (1 - 2 * t), 0.5, 0)
+            end,
+        })
+        Corner(marker, 3)
+        New("UIStroke", { Color = Color3.new(0, 0, 0), Thickness = 1, Transparency = 0.6 }, marker)
     end
+
+    -- The door into the editor: a dark glass chip with a chevron at the right end of the ramp.
+    local chip = Themed(New("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.new(1, -RAMP_H / 2, 0.5, 0),
+        Size = UDim2.fromOffset(RAMP_H - 6, RAMP_H - 6),
+        BackgroundTransparency = 0.3,
+        BorderSizePixel = 0,
+        ZIndex = 5,
+    }, ramp), { BackgroundColor3 = "PaneBottom" })
+    Corner(chip, RAMP_H)
+    Themed(New("UIStroke", { Thickness = 1, Transparency = 0.55 }, chip), { Color = "Rim" })
+    local chipScale = New("UIScale", { Scale = 1 }, chip)
+    local chevron, chevronLines = Chevron(chip, 6)
+    chevron.Position = UDim2.new(0.5, 1, 0.5, 0)
+    for _, line in ipairs(chevronLines) do Themed(line, { BackgroundColor3 = "TextPrimary" }) end
 
     ramp.MouseEnter:Connect(function()
         Tween(rampScale, Motion.Pop, { Scale = 1.015 })
         Tween(rampRim, Motion.Hover, { Transparency = 0.25 })
+        Tween(chipScale, Motion.Pop, { Scale = 1.15 })
         playSound("Hover")
     end)
     ramp.MouseLeave:Connect(function()
         Tween(rampScale, Motion.Pop, { Scale = 1 })
         Tween(rampRim, Motion.Hover, { Transparency = 0.6 })
+        Tween(chipScale, Motion.Pop, { Scale = 1 })
     end)
 
     local function themeStops()
@@ -640,7 +1084,7 @@ function Container:AddPalette(idx, info)
             function() Library:SetAccentGradient(nil) return themeStops() end)
     end
     ramp.MouseButton1Click:Connect(function() Palette:Open() end)
-    bindTooltip(W, ramp, function() return info.Tooltip or "Open the gradient palette" end)
+    bindTooltip(W, ramp, function() return info.Tooltip or "Open the gradient editor" end)
 
     function Palette:SetVisible(visible) holder.Visible = visible end
     if idx then Library.Options[idx] = Palette end

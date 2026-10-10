@@ -62,8 +62,9 @@ Beyond API parity, FishyUI adds a set of things most Roblox UI libraries don't h
 - **Pin any control** — right-click a toggle or slider to pop it out as its own attachment, building a
   HUD from the handful of controls you actually use.
 - **Edge rail** — shove the window into a screen edge and it collapses into a slim strip of tab icons.
-- **Gradient palette** — a paint-palette editor with draggable stops, presets and a hex field that
-  recolours every accent fill live.
+- **Gradient palette** — a glass gradient editor with a live preview of the controls it recolours,
+  draggable stop knobs (click the track to add one), shade, hue, hex and exact-position fields, add /
+  remove / flip / even-spacing actions and eight presets. Every accent fill updates live as you edit.
 - **Sound design** — soft glass ticks on toggles, a grain per slider step, a low sweep on tab changes,
   with a master volume.
 - **Six custom cursors**, a per-theme ambient backdrop, and a first-run language → theme → font flow.
