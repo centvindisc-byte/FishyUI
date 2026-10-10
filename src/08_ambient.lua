@@ -107,7 +107,9 @@ local function BuildAmbient(W)
 
     local function rebuild()
         clear()
-        kind = AmbientKinds[Library.Theme] or "none"
+        -- The particles are the one thing that animates every frame while the window just sits open, so
+        -- they are the first thing a lower glass quality gives up.
+        kind = if qualityRank() >= 3 then AmbientKinds[Library.Theme] or "none" else "none"
         if kind == "motes" then
             buildParticles(16, true, false)
         elseif kind == "embers" then
@@ -125,10 +127,16 @@ local function BuildAmbient(W)
         end
     end
 
-    local clock = 0
+    -- Drift is drawn every frame, but the breathing is a slow swell of a few seconds, so it is only
+    -- refreshed at BREATHE_RATE: a third of the writes for a fade nobody can see step.
+    local BREATHE_RATE = 1 / 20
+    local clock, sinceBreath = 0, math.huge
     Library:GiveSignal(RunService.Heartbeat:Connect(function(dt)
         if not W.Holder.Visible or kind == "none" then return end
         clock += dt
+        sinceBreath += dt
+        local breathe = sinceBreath >= BREATHE_RATE
+        if breathe then sinceBreath = 0 end
         for _, particle in ipairs(particles) do
             local position = particle.Frame.Position
             local y = position.Y.Scale + particle.Speed * dt * 6
@@ -140,7 +148,9 @@ local function BuildAmbient(W)
                 particle.Frame.Rotation += particle.Spin * dt
             end
             -- Gentle breathing so the field never looks static.
-            particle.Frame.BackgroundTransparency = math.clamp(particle.Base + math.sin(clock * 1.3 + particle.Phase) * 0.18, 0.3, 0.97)
+            if breathe then
+                particle.Frame.BackgroundTransparency = math.clamp(particle.Base + math.sin(clock * 1.3 + particle.Phase) * 0.18, 0.3, 0.97)
+            end
         end
         for _, band in ipairs(bands) do
             local position = band.Frame.Position
@@ -163,4 +173,5 @@ local function BuildAmbient(W)
 
     rebuild()
     W.Ambient = layer
+    W.RebuildAmbient = rebuild
 end

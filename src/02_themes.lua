@@ -140,6 +140,7 @@ for key, value in pairs(Themes.Amethyst) do Glass[key] = value end
 local THEME_FILE_FOLDER = "FishyUI"
 local THEME_FILE = THEME_FILE_FOLDER .. "/theme.txt"
 local THEME_MORPH_TIME = 0.45
+local THEME_MORPH_STEP = 1 / 40 -- seconds between palette applies while a theme cross-fades
 
 local function saveThemeChoice(name)
     if typeof(writefile) ~= "function" then return end
@@ -160,27 +161,50 @@ local function loadThemeChoice()
     return nil
 end
 
-local function paneGradientColor()
-    return ColorSequence.new({
-        ColorSequenceKeypoint.new(0.0, Glass.PaneTop),
-        ColorSequenceKeypoint.new(0.5, Glass.PaneMid),
-        ColorSequenceKeypoint.new(1.0, Glass.PaneBottom),
-    })
+-- Wraps a gradient builder so it hands back the same sequence object for as long as its inputs are
+-- unchanged. Gradients bound to the palette then compare equal to what they already show, and a re-apply
+-- (a new accent, a font change, most frames of a theme morph for tokens that aren't moving) skips them
+-- instead of rebuilding and rewriting every one.
+local function cachedSequence(build)
+    local lastA, lastB, lastC, last
+    return function(a, b, c)
+        if last == nil or a ~= lastA or b ~= lastB or c ~= lastC then
+            lastA, lastB, lastC = a, b, c
+            last = build(a, b, c)
+        end
+        return last
+    end
 end
 
-local function edgeGradientColor()
+local buildPaneGradient = cachedSequence(function(top, mid, bottom)
+    return ColorSequence.new({
+        ColorSequenceKeypoint.new(0.0, top),
+        ColorSequenceKeypoint.new(0.5, mid),
+        ColorSequenceKeypoint.new(1.0, bottom),
+    })
+end)
+local function paneGradientColor()
+    return buildPaneGradient(Glass.PaneTop, Glass.PaneMid, Glass.PaneBottom)
+end
+
+local buildEdgeGradient = cachedSequence(function(mid, low)
     return ColorSequence.new({
         ColorSequenceKeypoint.new(0.00, Color3.new(1, 1, 1)),
-        ColorSequenceKeypoint.new(0.40, Glass.EdgeMid),
-        ColorSequenceKeypoint.new(1.00, Glass.EdgeLow),
+        ColorSequenceKeypoint.new(0.40, mid),
+        ColorSequenceKeypoint.new(1.00, low),
     })
+end)
+local function edgeGradientColor()
+    return buildEdgeGradient(Glass.EdgeMid, Glass.EdgeLow)
 end
 
-local function sheenTransparency()
-    local top = Glass.SheenTransparency
+local buildSheen = cachedSequence(function(top)
     return NumberSequence.new({
         NumberSequenceKeypoint.new(0, top),
         NumberSequenceKeypoint.new(0.55, top + (1 - top) * 0.65),
         NumberSequenceKeypoint.new(1, 1),
     })
+end)
+local function sheenTransparency()
+    return buildSheen(Glass.SheenTransparency)
 end

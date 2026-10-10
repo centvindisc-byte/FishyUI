@@ -127,6 +127,9 @@ local Library = {
 
     CornerRadius = 14,
     DPIScale = 1,
+    -- "High" draws every layer of the glass and lets the window's light follow the pointer; "Balanced"
+    -- keeps the static glass; "Low" is flat glass with no edge textures, sheen, ambient or blur.
+    GlassQuality = "High",
     NotifySide = "Right",
     ShowCustomCursor = true,
     ForceCheckbox = false,
@@ -176,30 +179,55 @@ local function resolveToken(source)
     return Glass[source]
 end
 
+-- The value last written to each bound property. Re-applying the palette compares against this in Lua and
+-- only writes what actually changed: every write crosses into the engine and dirties the instance's layout
+-- and render state, and on a typical window most bound values don't move when the accent, font or a
+-- material token changes.
+local Applied = {}
+
 -- Binds instance properties to the live palette. Each property maps to a token name, or to a function
 -- for values that also depend on state (the active tab's label, a toggle that is on, ...).
 -- The registry keeps strong references: Roblox can collect the Lua proxy of an instance that is still on
 -- screen, which would silently drop it from a weak table. Destroyed instances are pruned on apply instead.
 local function Themed(inst, props)
-    local bound = Library.Registry[inst]
+    local bound, applied = Library.Registry[inst], Applied[inst]
     if not bound then
         bound = {}
         Library.Registry[inst] = bound
     end
+    if not applied then
+        applied = {}
+        Applied[inst] = applied
+    end
     for property, source in pairs(props) do
+        local value = resolveToken(source)
         bound[property] = source
-        inst[property] = resolveToken(source)
+        applied[property] = value
+        inst[property] = value
     end
     return inst
 end
 
-local function applyTheme()
-    for inst, bound in pairs(Library.Registry) do
-        if inst.Parent == nil then
-            Library.Registry[inst] = nil -- closed popups and destroyed rows
+-- `skipPrune` leaves out the sweep for instances that have left the tree. The sweep reads every
+-- instance's Parent, so the per-frame applies of a theme morph skip it and leave it to the final frame.
+local function applyTheme(skipPrune)
+    local registry = Library.Registry
+    for inst, bound in pairs(registry) do
+        if not skipPrune and inst.Parent == nil then
+            registry[inst] = nil -- closed popups and destroyed rows
+            Applied[inst] = nil
         else
+            local applied = Applied[inst]
+            if not applied then
+                applied = {}
+                Applied[inst] = applied
+            end
             for property, source in pairs(bound) do
-                inst[property] = resolveToken(source)
+                local value = resolveToken(source)
+                if applied[property] ~= value then
+                    applied[property] = value
+                    inst[property] = value
+                end
             end
         end
     end
@@ -207,8 +235,9 @@ end
 
 -- The gradient used by accent fills (toggles, sliders, bars). A custom gradient from the palette editor
 -- overrides the theme's two-stop accent.
+local buildAccent = cachedSequence(function(deep, light) return ColorSequence.new(deep, light) end)
 local function accentSequence()
-    return Library.AccentGradient or ColorSequence.new(Glass.AccentDeep, Glass.Accent)
+    return Library.AccentGradient or buildAccent(Glass.AccentDeep, Glass.Accent)
 end
 
 -- A theme token nudged toward another one. Satellites float over the game rather than over the window's
@@ -383,8 +412,12 @@ end
 --
 -- One Heartbeat drives every spring in the library. Objects join with Animator.Wake and leave on their
 -- own once :Step(dt) reports they have come to rest, so idle UI costs nothing.
+--
+-- A frame is integrated in small substeps so stiff springs stay stable, but only the last substep's state
+-- is ever seen. An object that has a :Render() is therefore stepped without drawing and drawn once, after
+-- its substeps, instead of writing its properties up to four times a frame.
 -------------------------------------------------------------------------------------------------------
-local Animator = { active = {}, pending = {}, stepping = false, connection = nil }
+local Animator = { active = {}, pending = {}, stepping = false, connection = nil, Frame = 0 }
 local ANIMATOR_MAX_STEP = 1 / 240
 
 function Animator.Wake(object)
@@ -398,6 +431,7 @@ function Animator.Wake(object)
     Animator.connection = RunService.Heartbeat:Connect(function(dt)
         dt = math.min(dt, 1 / 20)
         local steps = math.max(1, math.ceil(dt / ANIMATOR_MAX_STEP))
+        Animator.Frame += 1
         Animator.stepping = true
         for object in pairs(Animator.active) do
             local moving = false
@@ -405,6 +439,7 @@ function Animator.Wake(object)
                 moving = object:Step(dt / steps)
                 if not moving then break end
             end
+            if object.Render then object:Render() end
             if not moving then Animator.active[object] = nil end
         end
         Animator.stepping = false
@@ -437,11 +472,13 @@ local function Spring(stiffness, dampingRatio, value, onStep, epsilon)
         self.value += self.velocity * dt
         if math.abs(self.target - self.value) < epsilon and math.abs(self.velocity) < epsilon * 10 then
             self.value, self.velocity = self.target, 0
-            onStep(self.value, 0)
             return false
         end
-        onStep(self.value, self.velocity)
         return true
+    end
+
+    function spring:Render()
+        onStep(self.value, self.velocity)
     end
 
     function spring:Set(target)

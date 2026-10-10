@@ -132,6 +132,19 @@ BuildSatellites = function(W)
         return targets, attached
     end
 
+    -- The same, computed once per animator frame and shared. Every docked pod asks for it on every
+    -- substep, and working it out reads the window and screen geometry for every side and every pod, so
+    -- sharing one answer per frame turns dozens of engine reads per pod per frame into a handful in total.
+    -- Nothing moves the window or the carry within one Heartbeat, so the cached answer is exact.
+    local cachedFrame, cachedTargets, cachedAttached = -1, nil, nil
+    local function frameDockTargets()
+        if cachedFrame ~= Animator.Frame then
+            cachedFrame = Animator.Frame
+            cachedTargets, cachedAttached = dockTargets()
+        end
+        return cachedTargets, cachedAttached
+    end
+
     local function wakeAll()
         for _, pod in ipairs(pods) do Animator.Wake(pod) end
     end
@@ -144,7 +157,7 @@ BuildSatellites = function(W)
             Name = name, Title = title, Side = side or "Right", RenderSide = side or "Right",
             Order = #pods + 1, -- position within its side's stack; drag-and-drop rewrites it
             Deployed = false, Docked = true, Carried = false, Landing = false, Attached = false,
-            x = 0, y = 0, vx = 0, vy = 0, tx = 0, ty = 0, rotation = 0, lift = 0, alpha = 0, alphaTarget = 0,
+            x = 0, y = 0, vx = 0, vy = 0, tx = 0, ty = 0, rotation = 0, lift = 0, alpha = 0, alphaTarget = 0, hold = 0,
         }
 
         local frame = New("Frame", {
@@ -263,12 +276,6 @@ BuildSatellites = function(W)
             ZIndex = 20,
         }, frame)
 
-        local function renderAlpha()
-            body.GroupTransparency = 1 - pod.alpha
-            shadow.ImageTransparency = 1 - (1 - Glass.ShadowTransparency) * pod.alpha
-            frame.Visible = pod.alpha > 0.01
-        end
-
         local function layoutClamps(hold)
             local side = pod.RenderSide
             local vertical = isVertical(side)
@@ -290,10 +297,20 @@ BuildSatellites = function(W)
             end
         end
 
+        local drawnAlpha
+        local function renderAlpha()
+            -- GroupTransparency re-renders the whole CanvasGroup, so it is only written when it moves.
+            if drawnAlpha == pod.alpha then return end
+            drawnAlpha = pod.alpha
+            body.GroupTransparency = 1 - pod.alpha
+            shadow.ImageTransparency = 1 - (1 - Glass.ShadowTransparency) * pod.alpha
+            frame.Visible = pod.alpha > 0.01
+        end
+
         function pod:Step(dt)
             local target
             if self.Docked and not self.Carried then
-                local targets, attached = dockTargets()
+                local targets, attached = frameDockTargets()
                 target = targets[self] or Vector2.new(self.x, self.y)
                 self.Attached = attached[self] == true
             else
@@ -319,14 +336,8 @@ BuildSatellites = function(W)
             self.lift += (liftTarget - self.lift) * math.min(1, dt * 16)
             self.alpha += (self.alphaTarget - self.alpha) * math.min(1, dt * 12)
 
-            frame.Position = UDim2.fromOffset(self.x, self.y)
-            frame.Rotation = self.rotation
-            frameScale.Scale = Scale.Scale * (1 + 0.04 * self.lift)
-            renderAlpha()
-
             local distance = (target - Vector2.new(self.x, self.y)).Magnitude
-            local hold = if self.Attached and not self.Carried then math.clamp(1 - distance / 24, 0, 1) else 0
-            layoutClamps(hold)
+            self.hold = if self.Attached and not self.Carried then math.clamp(1 - distance / 24, 0, 1) else 0
 
             local resting = distance < 0.3 and math.abs(self.vx) < 2 and math.abs(self.vy) < 2
                 and math.abs(self.rotation - lean) < 0.05 and math.abs(self.lift - liftTarget) < 0.01
@@ -334,9 +345,15 @@ BuildSatellites = function(W)
             if not resting then return true end
             self.x, self.y = target.X, target.Y
             self.alpha, self.Landing = self.alphaTarget, false
-            frame.Position = UDim2.fromOffset(self.x, self.y)
-            renderAlpha()
             return false
+        end
+
+        function pod:Render()
+            frame.Position = UDim2.fromOffset(self.x, self.y)
+            frame.Rotation = self.rotation
+            frameScale.Scale = Scale.Scale * (1 + 0.04 * self.lift)
+            renderAlpha()
+            layoutClamps(self.hold)
         end
 
         -----------------------------------------------------------------------------------------------

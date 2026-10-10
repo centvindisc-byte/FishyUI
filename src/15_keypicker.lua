@@ -72,7 +72,8 @@ local function BuildKeybindFrame(screenGui)
         Visible = false,
         ZIndex = 150,
     }, screenGui)
-    PopupMaterial(frame, 12, 20)
+    -- No refraction band: the list layout below stacks every direct child, so it would become a row.
+    PopupMaterial(frame, 12, 20, false)
     New("UIPadding", {
         PaddingTop = UDim.new(0, 10),
         PaddingBottom = UDim.new(0, 10),

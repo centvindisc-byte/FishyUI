@@ -241,6 +241,13 @@ AppearanceBox:AddDropdown("ThemePick", {
     Callback = function(value) Library:SetTheme(value) end,
 })
 AppearanceBox:AddPalette("AccentGradient", { Text = "Accent gradient" })
+AppearanceBox:AddDropdown("GlassQuality", {
+    Text = "Glass quality",
+    Values = { "High", "Balanced", "Low" },
+    Default = Library.GlassQuality,
+    Tooltip = "High: live light that follows the pointer. Balanced: static glass. Low: flat glass, no blur",
+    Callback = function(value) Library:SetGlassQuality(value) end,
+})
 AppearanceBox:AddLabel("Some themes change the material, not just the colour: Frost is light, Onyx is matte, Neon glows, Midnight is flat OLED black.", true)
 
 local TypographyBox = Interface:AddLeftGroupbox("Language and type")

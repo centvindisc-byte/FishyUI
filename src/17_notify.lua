@@ -65,7 +65,8 @@ function Library:Notify(info, duration)
     }, slot)
     Corner(toast, 12)
     New("UIGradient", { Rotation = 115, Color = paneGradientColor() }, toast)
-    New("UIStroke", { Color = Glass.Rim, Transparency = Glass.BorderTransparency, Thickness = 1 }, toast)
+    local rim = New("UIStroke", { Color = Glass.Rim, Transparency = Glass.BorderTransparency, Thickness = 1 }, toast)
+    New("UIGradient", { Rotation = LIGHT_ANGLE, Transparency = RIM_LIGHT, Color = prismColor() }, rim)
     -- The accent bar is placed freely on the toast; the text stacks inside its own padded body.
     local bar = New("Frame", {
         AnchorPoint = Vector2.new(0, 0.5),

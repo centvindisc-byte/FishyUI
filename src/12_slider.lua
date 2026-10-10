@@ -156,7 +156,8 @@ function Container:AddSlider(idx, info)
         BorderSizePixel = 0,
         ZIndex = 6,
     }, tube), { BackgroundColor3 = "Knob" })
-    Corner(bead, SLIDER_BEAD / 2)
+    -- Half the height, not a fixed radius: the bead swells and stretches and must stay a round drop.
+    New("UICorner", { CornerRadius = UDim.new(0.5, 0) }, bead)
     Themed(New("UIStroke", { Thickness = 1.5, Transparency = 0.1 }, bead), { Color = "Accent" })
     local beadCore = Themed(New("Frame", {
         AnchorPoint = Vector2.new(0.5, 0.5),
@@ -217,7 +218,8 @@ function Container:AddSlider(idx, info)
     local level, levelVelocity = 0, 0
     local function draw()
         local stretch = math.min(7, math.abs(levelVelocity) * 3)
-        local size = SLIDER_BEAD + (dragging and 4 or (hovered and 2 or 0))
+        -- Held, the bead swells into a clear lens over the tube (see setDragging).
+        local size = SLIDER_BEAD + (dragging and 8 or (hovered and 2 or 0))
         fill.Size = UDim2.fromScale(level, 1)
         fillGradient.Size = UDim2.new(0, math.max(1, tube.AbsoluteSize.X / W.Scale.Scale), 1, 0)
         surfaceGlow.Position = UDim2.fromScale(level, 0.5)
@@ -265,6 +267,10 @@ function Container:AddSlider(idx, info)
         playSound(active and "Press" or "ToggleOff")
         Tween(bubbleScale, active and Motion.Pop or Motion.FadeOut, { Scale = active and 1 or 0 })
         Tween(chipRim, Motion.Hover, { Transparency = active and 0.35 or 0.8 })
+        -- While held, the bead turns to clear glass, so the level shows through it under its accent rim,
+        -- and settles back to a solid bead when released.
+        Tween(bead, Motion.Hover, { BackgroundTransparency = active and 0.74 or 0 })
+        Tween(beadCore, Motion.Hover, { BackgroundTransparency = active and 1 or 0 })
         draw()
     end
 

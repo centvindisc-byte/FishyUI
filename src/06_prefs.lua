@@ -10,6 +10,7 @@ local Prefs = {
     SkipLanguage = false,
     SkipTheme = false,
     SkipFont = false,
+    GlassQuality = "High",
 }
 
 local function savePrefs()
@@ -37,6 +38,7 @@ end
 local function clearPrefs()
     Prefs.Language, Prefs.FontFamily = "en", "Gotham"
     Prefs.SkipLanguage, Prefs.SkipTheme, Prefs.SkipFont = false, false, false
+    Prefs.GlassQuality = "High"
     if typeof(delfile) == "function" and typeof(isfile) == "function" then
         pcall(function()
             if isfile(PREFS_FILE) then delfile(PREFS_FILE) end
@@ -189,4 +191,5 @@ local function applyPrefs()
     Fonts.Mono = if entry.Name == "Mono" then Fonts.Bold else FONT_MONO
     Library.FontFamily = entry.Name
     Library.Scheme.Font = Fonts.Bold
+    Library.GlassQuality = if QUALITY_RANK[Prefs.GlassQuality] then Prefs.GlassQuality else "High"
 end

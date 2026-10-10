@@ -181,6 +181,7 @@ for key, value in pairs(Themes.Amethyst) do Glass[key] = value end
 local THEME_FILE_FOLDER = "FishyUI"
 local THEME_FILE = THEME_FILE_FOLDER .. "/theme.txt"
 local THEME_MORPH_TIME = 0.45
+local THEME_MORPH_STEP = 1 / 40 -- seconds between palette applies while a theme cross-fades
 
 local function saveThemeChoice(name)
     if typeof(writefile) ~= "function" then return end
@@ -201,29 +202,52 @@ local function loadThemeChoice()
     return nil
 end
 
-local function paneGradientColor()
-    return ColorSequence.new({
-        ColorSequenceKeypoint.new(0.0, Glass.PaneTop),
-        ColorSequenceKeypoint.new(0.5, Glass.PaneMid),
-        ColorSequenceKeypoint.new(1.0, Glass.PaneBottom),
-    })
+-- Wraps a gradient builder so it hands back the same sequence object for as long as its inputs are
+-- unchanged. Gradients bound to the palette then compare equal to what they already show, and a re-apply
+-- (a new accent, a font change, most frames of a theme morph for tokens that aren't moving) skips them
+-- instead of rebuilding and rewriting every one.
+local function cachedSequence(build)
+    local lastA, lastB, lastC, last
+    return function(a, b, c)
+        if last == nil or a ~= lastA or b ~= lastB or c ~= lastC then
+            lastA, lastB, lastC = a, b, c
+            last = build(a, b, c)
+        end
+        return last
+    end
 end
 
-local function edgeGradientColor()
+local buildPaneGradient = cachedSequence(function(top, mid, bottom)
+    return ColorSequence.new({
+        ColorSequenceKeypoint.new(0.0, top),
+        ColorSequenceKeypoint.new(0.5, mid),
+        ColorSequenceKeypoint.new(1.0, bottom),
+    })
+end)
+local function paneGradientColor()
+    return buildPaneGradient(Glass.PaneTop, Glass.PaneMid, Glass.PaneBottom)
+end
+
+local buildEdgeGradient = cachedSequence(function(mid, low)
     return ColorSequence.new({
         ColorSequenceKeypoint.new(0.00, Color3.new(1, 1, 1)),
-        ColorSequenceKeypoint.new(0.40, Glass.EdgeMid),
-        ColorSequenceKeypoint.new(1.00, Glass.EdgeLow),
+        ColorSequenceKeypoint.new(0.40, mid),
+        ColorSequenceKeypoint.new(1.00, low),
     })
+end)
+local function edgeGradientColor()
+    return buildEdgeGradient(Glass.EdgeMid, Glass.EdgeLow)
 end
 
-local function sheenTransparency()
-    local top = Glass.SheenTransparency
+local buildSheen = cachedSequence(function(top)
     return NumberSequence.new({
         NumberSequenceKeypoint.new(0, top),
         NumberSequenceKeypoint.new(0.55, top + (1 - top) * 0.65),
         NumberSequenceKeypoint.new(1, 1),
     })
+end)
+local function sheenTransparency()
+    return buildSheen(Glass.SheenTransparency)
 end
 
 -- ===== 03_core.lua =====
@@ -356,6 +380,9 @@ local Library = {
 
     CornerRadius = 14,
     DPIScale = 1,
+    -- "High" draws every layer of the glass and lets the window's light follow the pointer; "Balanced"
+    -- keeps the static glass; "Low" is flat glass with no edge textures, sheen, ambient or blur.
+    GlassQuality = "High",
     NotifySide = "Right",
     ShowCustomCursor = true,
     ForceCheckbox = false,
@@ -405,30 +432,55 @@ local function resolveToken(source)
     return Glass[source]
 end
 
+-- The value last written to each bound property. Re-applying the palette compares against this in Lua and
+-- only writes what actually changed: every write crosses into the engine and dirties the instance's layout
+-- and render state, and on a typical window most bound values don't move when the accent, font or a
+-- material token changes.
+local Applied = {}
+
 -- Binds instance properties to the live palette. Each property maps to a token name, or to a function
 -- for values that also depend on state (the active tab's label, a toggle that is on, ...).
 -- The registry keeps strong references: Roblox can collect the Lua proxy of an instance that is still on
 -- screen, which would silently drop it from a weak table. Destroyed instances are pruned on apply instead.
 local function Themed(inst, props)
-    local bound = Library.Registry[inst]
+    local bound, applied = Library.Registry[inst], Applied[inst]
     if not bound then
         bound = {}
         Library.Registry[inst] = bound
     end
+    if not applied then
+        applied = {}
+        Applied[inst] = applied
+    end
     for property, source in pairs(props) do
+        local value = resolveToken(source)
         bound[property] = source
-        inst[property] = resolveToken(source)
+        applied[property] = value
+        inst[property] = value
     end
     return inst
 end
 
-local function applyTheme()
-    for inst, bound in pairs(Library.Registry) do
-        if inst.Parent == nil then
-            Library.Registry[inst] = nil -- closed popups and destroyed rows
+-- `skipPrune` leaves out the sweep for instances that have left the tree. The sweep reads every
+-- instance's Parent, so the per-frame applies of a theme morph skip it and leave it to the final frame.
+local function applyTheme(skipPrune)
+    local registry = Library.Registry
+    for inst, bound in pairs(registry) do
+        if not skipPrune and inst.Parent == nil then
+            registry[inst] = nil -- closed popups and destroyed rows
+            Applied[inst] = nil
         else
+            local applied = Applied[inst]
+            if not applied then
+                applied = {}
+                Applied[inst] = applied
+            end
             for property, source in pairs(bound) do
-                inst[property] = resolveToken(source)
+                local value = resolveToken(source)
+                if applied[property] ~= value then
+                    applied[property] = value
+                    inst[property] = value
+                end
             end
         end
     end
@@ -436,8 +488,9 @@ end
 
 -- The gradient used by accent fills (toggles, sliders, bars). A custom gradient from the palette editor
 -- overrides the theme's two-stop accent.
+local buildAccent = cachedSequence(function(deep, light) return ColorSequence.new(deep, light) end)
 local function accentSequence()
-    return Library.AccentGradient or ColorSequence.new(Glass.AccentDeep, Glass.Accent)
+    return Library.AccentGradient or buildAccent(Glass.AccentDeep, Glass.Accent)
 end
 
 -- A theme token nudged toward another one. Satellites float over the game rather than over the window's
@@ -612,8 +665,12 @@ end
 --
 -- One Heartbeat drives every spring in the library. Objects join with Animator.Wake and leave on their
 -- own once :Step(dt) reports they have come to rest, so idle UI costs nothing.
+--
+-- A frame is integrated in small substeps so stiff springs stay stable, but only the last substep's state
+-- is ever seen. An object that has a :Render() is therefore stepped without drawing and drawn once, after
+-- its substeps, instead of writing its properties up to four times a frame.
 -------------------------------------------------------------------------------------------------------
-local Animator = { active = {}, pending = {}, stepping = false, connection = nil }
+local Animator = { active = {}, pending = {}, stepping = false, connection = nil, Frame = 0 }
 local ANIMATOR_MAX_STEP = 1 / 240
 
 function Animator.Wake(object)
@@ -627,6 +684,7 @@ function Animator.Wake(object)
     Animator.connection = RunService.Heartbeat:Connect(function(dt)
         dt = math.min(dt, 1 / 20)
         local steps = math.max(1, math.ceil(dt / ANIMATOR_MAX_STEP))
+        Animator.Frame += 1
         Animator.stepping = true
         for object in pairs(Animator.active) do
             local moving = false
@@ -634,6 +692,7 @@ function Animator.Wake(object)
                 moving = object:Step(dt / steps)
                 if not moving then break end
             end
+            if object.Render then object:Render() end
             if not moving then Animator.active[object] = nil end
         end
         Animator.stepping = false
@@ -666,11 +725,13 @@ local function Spring(stiffness, dampingRatio, value, onStep, epsilon)
         self.value += self.velocity * dt
         if math.abs(self.target - self.value) < epsilon and math.abs(self.velocity) < epsilon * 10 then
             self.value, self.velocity = self.target, 0
-            onStep(self.value, 0)
             return false
         end
-        onStep(self.value, self.velocity)
         return true
+    end
+
+    function spring:Render()
+        onStep(self.value, self.velocity)
     end
 
     function spring:Set(target)
@@ -690,7 +751,95 @@ end
 -- ===== 04_materials.lua =====
 -------------------------------------------------------------------------------------------------------
 -- Materials
+--
+-- Liquid glass is built from a few layers, each standing for one thing light does at a real pane:
+--   body      the tinted glass, denser toward the shaded side
+--   rim       a hairline that is brightest where it faces the light (the key), dims across the sides and
+--             picks up again on the far edge, where light that crossed the glass leaves it (the bounce),
+--             with a faint prismatic fringe off each lobe
+--   edge      the lensed edge: crisp at the boundary and falling away inward, so the surface reads thick
+--   band      (panes) a softer second rim just inside the first on the far side, lit by light refracted
+--             through the glass; it is what makes a pane read as a slab rather than a sticker
+--   specular  a glint along the top edge, peaked toward the light
+--   glare     (window) a soft reflection that drifts toward the pointer while it is over the glass
+--
+-- One light lights everything (LIGHT_ANGLE). How strongly each layer shows comes from the theme's
+-- material tokens, so the matte themes (Onyx, Midnight) stay matte: no fringe, no band, no glare.
 -------------------------------------------------------------------------------------------------------
+
+-- The UIGradient rotation that runs away from the light, so the 0 end of every lighting gradient faces
+-- it. The light sits high and a little to the right, where the pane gradient has always put it.
+local LIGHT_ANGLE = 110
+local LIGHT_SWING = 34 -- the most the window's light leans toward the pointer, in degrees
+
+local QUALITY_RANK = { Low = 1, Balanced = 2, High = 3 }
+local function qualityRank()
+    return QUALITY_RANK[Library.GlassQuality] or 3
+end
+
+-- A Visible binding for a decorative layer that is only drawn at `rank` and above.
+local function atQuality(rank)
+    return function() return qualityRank() >= rank end
+end
+
+-- How strongly the theme's glass bends and splits light, 0..1, read off its edge token: the clear glasses
+-- (Glacier, Frost, Neon) sit near 1, the house glasses about half way, the matte ones (Onyx, Midnight) at 0.
+local function clarity()
+    return math.clamp((0.92 - Glass.EdgeTransparency) / 0.5, 0, 1)
+end
+
+-- Rim light along the light axis: the key lobe, a dark terminator across the sides, the bounce lobe.
+local RIM_LIGHT = NumberSequence.new({
+    NumberSequenceKeypoint.new(0.00, 0),
+    NumberSequenceKeypoint.new(0.20, 0.34),
+    NumberSequenceKeypoint.new(0.50, 0.86),
+    NumberSequenceKeypoint.new(0.80, 0.52),
+    NumberSequenceKeypoint.new(1.00, 0.2),
+})
+
+-- The lensed edge stays visible all the way round (the glass is thick everywhere) but follows the light.
+local EDGE_LIGHT = NumberSequence.new({
+    NumberSequenceKeypoint.new(0.00, 0),
+    NumberSequenceKeypoint.new(0.50, 0.4),
+    NumberSequenceKeypoint.new(1.00, 0.1),
+})
+
+-- The refraction band is the rim's mirror image: nothing on the lit side, strongest on the far one.
+local BAND_LIGHT = NumberSequence.new({
+    NumberSequenceKeypoint.new(0.00, 1),
+    NumberSequenceKeypoint.new(0.45, 0.92),
+    NumberSequenceKeypoint.new(1.00, 0.25),
+})
+local BAND_INSET = 2
+
+-- A glint peaked toward the light and fading out at both ends.
+local SPECULAR_LINE = NumberSequence.new({
+    NumberSequenceKeypoint.new(0.00, 1),
+    NumberSequenceKeypoint.new(0.35, 0.5),
+    NumberSequenceKeypoint.new(0.62, 0),
+    NumberSequenceKeypoint.new(1.00, 1),
+})
+
+-- Colour along a rim, multiplied over the rim's own tint. A curved edge splits light a little: a cool
+-- fringe trails the key highlight and a warm one the bounce. Barely there, but it is the difference
+-- between a lit edge and a white line. Quantised so a theme morph rebuilds it a handful of times, not
+-- once per frame per rim.
+local PRISM_COOL = Color3.fromRGB(186, 224, 255)
+local PRISM_WARM = Color3.fromRGB(255, 206, 228)
+local buildPrism = cachedSequence(function(strength)
+    local white = Color3.new(1, 1, 1)
+    return ColorSequence.new({
+        ColorSequenceKeypoint.new(0.00, white),
+        ColorSequenceKeypoint.new(0.24, white:Lerp(PRISM_COOL, strength)),
+        ColorSequenceKeypoint.new(0.50, white),
+        ColorSequenceKeypoint.new(0.76, white:Lerp(PRISM_WARM, strength)),
+        ColorSequenceKeypoint.new(1.00, white),
+    })
+end)
+local function prismColor()
+    if qualityRank() < 2 then return buildPrism(0) end
+    return buildPrism(math.floor(clarity() * 0.85 * 20 + 0.5) / 20)
+end
 
 -- A transparency argument may be a fixed number or a theme token / function, in which case it follows
 -- the theme (materials like Onyx or Midnight dial the edge light right down).
@@ -703,6 +852,7 @@ local function themedTransparency(inst, property, source)
 end
 
 -- 9-sliced rim: crisp on the boundary, falling away inward, so a surface reads as lensed glass.
+-- Returns the image and its lighting gradient (which a live light can turn).
 local function GlassEdge(parent, radius, transparency, zIndex)
     local edge = Themed(New("ImageLabel", {
         Name = "GlassEdge",
@@ -714,17 +864,37 @@ local function GlassEdge(parent, radius, transparency, zIndex)
         SliceCenter = Rect.new(50, 50, 78, 78),
         SliceScale = math.max(radius, 1) / L.SliceBaseRadius,
         ZIndex = zIndex or 1,
-    }, parent), { ImageColor3 = "Rim" })
+    }, parent), { ImageColor3 = "Rim", Visible = atQuality(2) })
     themedTransparency(edge, "ImageTransparency", transparency)
-    Themed(New("UIGradient", {
-        Rotation = 104,
-        Transparency = NumberSequence.new({
-            NumberSequenceKeypoint.new(0.00, 0),
-            NumberSequenceKeypoint.new(0.50, 0.30),
-            NumberSequenceKeypoint.new(1.00, 0.08),
-        }),
+    local light = Themed(New("UIGradient", {
+        Rotation = LIGHT_ANGLE,
+        Transparency = EDGE_LIGHT,
     }, edge), { Color = edgeGradientColor })
-    return edge
+    return edge, light
+end
+
+-- The refraction band: the same lensed edge drawn again a couple of pixels inside the first, in the edge's
+-- light tint, and lit only on the side away from the light. Returns the image and its lighting gradient.
+local function RefractionBand(parent, radius, zIndex)
+    local band = Themed(New("ImageLabel", {
+        Name = "Refraction",
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.new(1, -BAND_INSET * 2, 1, -BAND_INSET * 2),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        Image = Assets.GlassEdge,
+        ScaleType = Enum.ScaleType.Slice,
+        SliceCenter = Rect.new(50, 50, 78, 78),
+        SliceScale = math.max(radius - BAND_INSET, 1) / L.SliceBaseRadius,
+        ZIndex = zIndex,
+    }, parent), {
+        ImageColor3 = "EdgeMid",
+        ImageTransparency = function() return 1 - clarity() * 0.42 end,
+        Visible = function() return qualityRank() >= 3 and clarity() > 0.02 end,
+    })
+    local light = New("UIGradient", { Rotation = LIGHT_ANGLE, Transparency = BAND_LIGHT }, band)
+    return band, light
 end
 
 -- Soft halo around a glass surface. GlassGlow is a hollow ring, so its inner edge has to line up with
@@ -747,7 +917,7 @@ local function GlassShadow(parent, spread, transparency, zIndex)
 end
 
 local function Specular(parent, inset, transparency, zIndex)
-    local line = New("Frame", {
+    local line = Themed(New("Frame", {
         Name = "Specular",
         AnchorPoint = Vector2.new(0.5, 0),
         Position = UDim2.new(0.5, 0, 0, 1),
@@ -756,26 +926,28 @@ local function Specular(parent, inset, transparency, zIndex)
         BackgroundTransparency = transparency,
         BorderSizePixel = 0,
         ZIndex = zIndex or 1,
-    }, parent)
-    New("UIGradient", {
-        Transparency = NumberSequence.new({
-            NumberSequenceKeypoint.new(0, 1),
-            NumberSequenceKeypoint.new(0.5, 0),
-            NumberSequenceKeypoint.new(1, 1),
-        }),
-    }, line)
+    }, parent), { Visible = atQuality(2) })
+    New("UIGradient", { Transparency = SPECULAR_LINE }, line)
     return line
 end
 
--- Window-grade glass: theme-tinted body lit from the top-left, rim, top-edge specular and lensed edge.
--- The window, bubble, popups and notifications all use it so they read as one material.
-local function PaneMaterial(frame, radius, edgeZ)
+-- A hairline rim lit by the shared light: the dual-lobe highlight with its prismatic fringe. Returns the
+-- lighting gradient so a live light can turn it.
+local function RimLight(stroke)
+    return Themed(New("UIGradient", { Rotation = LIGHT_ANGLE, Transparency = RIM_LIGHT }, stroke), { Color = prismColor })
+end
+
+-- Window-grade glass: theme-tinted body lit from above, rim, top-edge specular, refraction band and lensed
+-- edge. The window, bubble, pods, popups and notifications all use it so they read as one material.
+-- `withBand = false` leaves the refraction band off surfaces too small to show it (tooltips).
+-- `Lights` lists the lighting gradients, which the window hands to its live light.
+local function PaneMaterial(frame, radius, edgeZ, withBand)
     frame.BackgroundColor3 = Color3.new(1, 1, 1)
     frame.BorderSizePixel = 0
     Themed(frame, { BackgroundTransparency = "PaneTransparency" })
     local corner = Corner(frame, radius)
     Themed(New("UIGradient", {
-        Rotation = 115,
+        Rotation = LIGHT_ANGLE + 5,
         Transparency = NumberSequence.new({
             NumberSequenceKeypoint.new(0, 0.05),
             NumberSequenceKeypoint.new(1, 0.2),
@@ -787,23 +959,43 @@ local function PaneMaterial(frame, radius, edgeZ)
         Thickness = 1,
         LineJoinMode = Enum.LineJoinMode.Round,
     }, frame), { Color = "Rim", Transparency = "BorderTransparency" })
-    New("UIGradient", {
-        Rotation = 110,
-        Transparency = NumberSequence.new({
-            NumberSequenceKeypoint.new(0.00, 0),
-            NumberSequenceKeypoint.new(0.45, 0.72),
-            NumberSequenceKeypoint.new(1.00, 0.4),
-        }),
-    }, border)
+    local lights = { RimLight(border) }
 
     local specular = Specular(frame, radius * 4, 0.35, edgeZ - 1)
-    local edge = GlassEdge(frame, radius, "EdgeTransparency", edgeZ)
-    return { Corner = corner, Border = border, Specular = specular, Edge = edge }
+    local band
+    if withBand ~= false then
+        local bandLight
+        band, bandLight = RefractionBand(frame, radius, edgeZ - 1)
+        table.insert(lights, bandLight)
+    end
+    local edge, edgeLight = GlassEdge(frame, radius, "EdgeTransparency", edgeZ)
+    table.insert(lights, edgeLight)
+    return { Corner = corner, Border = border, Specular = specular, Edge = edge, Band = band, Lights = lights }
 end
 
--- Popups sit over busy content, so they use the same glass nearly opaque.
-local function PopupMaterial(frame, radius, edgeZ)
-    local pane = PaneMaterial(frame, radius, edgeZ)
+-- Re-fits a pane's radius-dependent layers after its corner radius changes. With `tweenInfo`, it tweens.
+local function ReshapePane(pane, radius, tweenInfo)
+    local goals = {
+        { pane.Corner, { CornerRadius = UDim.new(0, radius) } },
+        { pane.Edge, { SliceScale = math.max(radius, 1) / L.SliceBaseRadius } },
+        { pane.Specular, { Size = UDim2.new(1, -radius * 4, 0, 1) } },
+    }
+    if pane.Band then
+        table.insert(goals, { pane.Band, { SliceScale = math.max(radius - BAND_INSET, 1) / L.SliceBaseRadius } })
+    end
+    for _, pair in ipairs(goals) do
+        if tweenInfo then
+            Tween(pair[1], tweenInfo, pair[2])
+        else
+            for property, value in pairs(pair[2]) do pair[1][property] = value end
+        end
+    end
+end
+
+-- Popups sit over busy content, so they use the same glass nearly opaque. Small ones (tooltips) skip the
+-- refraction band; `withBand = false` also keeps it off a frame that stacks its own children with a layout.
+local function PopupMaterial(frame, radius, edgeZ, withBand)
+    local pane = PaneMaterial(frame, radius, edgeZ, withBand ~= false and radius >= 10)
     Themed(frame, { BackgroundTransparency = function() return math.min(Glass.PaneTransparency, 0.08) end })
     return pane
 end
@@ -831,17 +1023,19 @@ local function CardMaterial(frame, radius)
         Color = "Rim",
         Transparency = function() return 0.6 + Glass.BorderTransparency * 0.5 end,
     })
-    New("UIGradient", {
-        Rotation = 100,
-        Transparency = NumberSequence.new({
-            NumberSequenceKeypoint.new(0, 0.1),
-            NumberSequenceKeypoint.new(0.5, 0.8),
-            NumberSequenceKeypoint.new(1, 0.45),
-        }),
-    }, stroke)
+    RimLight(stroke)
     GlassEdge(frame, radius, function() return math.min(1, Glass.EdgeTransparency + 0.2) end, 2)
     return stroke
 end
+
+-- An etched well's rim: in shadow along the top, where the lip overhangs it, and catching a line of light
+-- along the bottom lip. One gradient on the stroke draws both, where this used to take a separate lip
+-- frame and its own gradient per field.
+local WELL_RIM = NumberSequence.new({
+    NumberSequenceKeypoint.new(0.00, 0.7),
+    NumberSequenceKeypoint.new(0.55, 0.6),
+    NumberSequenceKeypoint.new(1.00, 0),
+})
 
 -- Etched well for inputs, dropdown fields and slider tubes: darker than its surroundings, shaded at the
 -- top where the lip casts a shadow and catching a thin line of light along the bottom lip. Kept at least
@@ -863,25 +1057,9 @@ local function FieldMaterial(frame, radius)
     local stroke = Themed(New("UIStroke", {
         ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
         Thickness = 1,
-        Transparency = 0.82,
+        Transparency = 0.76,
     }, frame), { Color = "Rim" })
-    local lip = New("Frame", {
-        Name = "Lip",
-        AnchorPoint = Vector2.new(0.5, 1),
-        Position = UDim2.new(0.5, 0, 1, 0),
-        Size = UDim2.new(1, -radius * 2, 0, 1),
-        BackgroundColor3 = Color3.new(1, 1, 1),
-        BackgroundTransparency = 0.88,
-        BorderSizePixel = 0,
-        ZIndex = 2,
-    }, frame)
-    New("UIGradient", {
-        Transparency = NumberSequence.new({
-            NumberSequenceKeypoint.new(0, 1),
-            NumberSequenceKeypoint.new(0.5, 0),
-            NumberSequenceKeypoint.new(1, 1),
-        }),
-    }, lip)
+    New("UIGradient", { Rotation = 90, Transparency = WELL_RIM }, stroke)
     return stroke
 end
 
@@ -909,26 +1087,30 @@ local function GlassLens(parent, radius, zIndex)
         Thickness = 1,
         Transparency = 0.5,
     }, body), { Color = "Rim" })
-    New("UIGradient", {
-        Rotation = 102,
-        Transparency = NumberSequence.new({
-            NumberSequenceKeypoint.new(0, 0.02),
-            NumberSequenceKeypoint.new(0.5, 0.75),
-            NumberSequenceKeypoint.new(1, 0.3),
-        }),
-    }, rim)
+    RimLight(rim)
     local edge = GlassEdge(body, radius, 0.62, zIndex + 1)
     Specular(body, radius * 2, 0.4, zIndex + 2)
     return body, edge
 end
 
--- A soft ring of light that swells out from the centre of `parent` and fades: the press response.
-local function Pulse(parent, zIndex)
-    local size = math.max(parent.AbsoluteSize.X, parent.AbsoluteSize.Y)
+-- A soft ring of light that swells out through `parent` and fades: the press response. Light enters the
+-- glass where it is touched, so the ring starts at `at` (an absolute pointer position) when given, and
+-- grows far enough to reach the far side from there.
+local function Pulse(parent, zIndex, at)
+    local topLeft, extent = parent.AbsolutePosition, parent.AbsoluteSize
+    local size = math.max(extent.X, extent.Y)
+    local origin = Vector2.new(0.5, 0.5)
+    if at and extent.X > 0 and extent.Y > 0 then
+        origin = Vector2.new(
+            math.clamp((at.X - topLeft.X) / extent.X, 0, 1),
+            math.clamp((at.Y - topLeft.Y) / extent.Y, 0, 1)
+        )
+    end
+    local reach = math.max(1, 2 * math.max(origin.X, 1 - origin.X, origin.Y, 1 - origin.Y))
     local ring = Themed(New("Frame", {
         Name = "Pulse",
         AnchorPoint = Vector2.new(0.5, 0.5),
-        Position = UDim2.fromScale(0.5, 0.5),
+        Position = UDim2.fromScale(origin.X, origin.Y),
         Size = UDim2.fromOffset(0, 0),
         BackgroundTransparency = 0.72,
         BorderSizePixel = 0,
@@ -936,7 +1118,7 @@ local function Pulse(parent, zIndex)
     }, parent), { BackgroundColor3 = "Accent" })
     Corner(ring, 999)
     Tween(ring, TweenInfo.new(0.55, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
-        Size = UDim2.fromOffset(size * 1.3, size * 1.3),
+        Size = UDim2.fromOffset(size * 1.3 * reach, size * 1.3 * reach),
         BackgroundTransparency = 1,
     })
     task.delay(0.6, function() ring:Destroy() end)
@@ -963,6 +1145,7 @@ local function HeaderButton(parent, name, rightOffset)
     }, button), { BackgroundColor3 = "LensTint" })
     Corner(plate, L.HeaderButton / 2)
     local rim = Themed(New("UIStroke", { Thickness = 1, Transparency = 0.7 }, plate), { Color = "Rim" })
+    RimLight(rim)
     local scale = New("UIScale", { Scale = 1 }, button)
     button.MouseEnter:Connect(function()
         Tween(plate, Motion.Hover, { BackgroundTransparency = 0.8 })
@@ -1021,6 +1204,108 @@ local function PopupClose(panel, W)
     end)
     button.MouseButton1Click:Connect(function() W:ClosePopup() end)
     return button
+end
+
+-- How bright the window's glare is: a share of the theme's sheen, so the matte and flat themes (Onyx,
+-- Neon, Midnight) have none. `presence` is 0 at rest and 1 while the pointer is over the glass.
+local function glareStrength()
+    return (1 - Glass.SheenTransparency) * 0.9
+end
+local function glareTransparency(presence)
+    return 1 - glareStrength() * (0.35 + 0.65 * presence)
+end
+local GLARE_REST = Vector2.new(0.66, 0.04) -- where the reflection of the light sits when nothing moves it
+local GLARE_SIZE = 440
+
+-- The window's live light. While the pointer is over `surface` the light leans toward it (the rim's key
+-- highlight slides round toward the pointer, the bounce opposite it) and a soft glare drifts after it, all
+-- on springs, like tilting a pane of glass under a lamp. `lights` are the lighting gradients to turn;
+-- the glare is built inside `glareParent`. It only runs at High quality, and it only wakes when the
+-- pointer moves over the glass or leaves it, so a still pointer or a hidden window costs nothing.
+local function LiveLight(surface, lights, glareParent)
+    local light = {
+        angle = LIGHT_ANGLE, angleVelocity = 0, angleTarget = LIGHT_ANGLE,
+        glare = GLARE_REST, glareVelocity = Vector2.zero, glareTarget = GLARE_REST,
+        presence = 0, presenceVelocity = 0, presenceTarget = 0,
+        hovering = false,
+    }
+
+    local glare = Themed(New("ImageLabel", {
+        Name = "Reflection",
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(GLARE_REST.X, GLARE_REST.Y),
+        Size = UDim2.fromOffset(GLARE_SIZE, GLARE_SIZE),
+        BackgroundTransparency = 1,
+        Image = Assets.Spark,
+        ZIndex = glareParent.ZIndex,
+    }, glareParent), {
+        ImageColor3 = "EdgeMid",
+        ImageTransparency = function() return glareTransparency(light.presence) end,
+        Visible = function() return qualityRank() >= 3 and glareStrength() > 0.005 end,
+    })
+
+    function light:Step(dt)
+        local k = 70
+        self.angleVelocity += (k * (self.angleTarget - self.angle) - 2 * math.sqrt(k) * 0.9 * self.angleVelocity) * dt
+        self.angle += self.angleVelocity * dt
+
+        local kg = 110
+        self.glareVelocity += ((self.glareTarget - self.glare) * kg - self.glareVelocity * (2 * math.sqrt(kg) * 0.85)) * dt
+        self.glare += self.glareVelocity * dt
+
+        local kp = 90
+        self.presenceVelocity += (kp * (self.presenceTarget - self.presence) - 2 * math.sqrt(kp) * self.presenceVelocity) * dt
+        self.presence += self.presenceVelocity * dt
+
+        if math.abs(self.angleTarget - self.angle) < 0.05 and math.abs(self.angleVelocity) < 0.5
+            and (self.glareTarget - self.glare).Magnitude < 0.0005 and self.glareVelocity.Magnitude < 0.005
+            and math.abs(self.presenceTarget - self.presence) < 0.002 and math.abs(self.presenceVelocity) < 0.02 then
+            self.angle, self.angleVelocity = self.angleTarget, 0
+            self.glare, self.glareVelocity = self.glareTarget, Vector2.zero
+            self.presence, self.presenceVelocity = self.presenceTarget, 0
+            return false
+        end
+        return true
+    end
+
+    function light:Render()
+        for _, gradient in ipairs(lights) do
+            gradient.Rotation = self.angle
+        end
+        glare.Position = UDim2.fromScale(self.glare.X, self.glare.Y)
+        glare.ImageTransparency = glareTransparency(self.presence)
+    end
+
+    -- `position` is the pointer in absolute pixels, or nil to let the light settle back to rest.
+    function light:Point(position)
+        local hovering, at = false, nil
+        if position and qualityRank() >= 3 then
+            local topLeft, size = surface.AbsolutePosition, surface.AbsoluteSize
+            if size.X > 0 and size.Y > 0 then
+                at = Vector2.new((position.X - topLeft.X) / size.X, (position.Y - topLeft.Y) / size.Y)
+                hovering = at.X >= 0 and at.X <= 1 and at.Y >= 0 and at.Y <= 1
+            end
+        end
+        if not hovering and not self.hovering then return end
+        self.hovering = hovering
+        if hovering then
+            -- The light comes from the pointer's side, so the gradients run from it through the centre.
+            -- It leans at most LIGHT_SWING from rest, and less the nearer the pointer is to the centre,
+            -- where its direction means nothing.
+            local size = surface.AbsoluteSize
+            local dx, dy = (0.5 - at.X) * size.X, (0.5 - at.Y) * size.Y
+            local pull = math.clamp(math.sqrt(dx * dx + dy * dy) / (math.min(size.X, size.Y) / 2), 0, 1)
+            local delta = (math.deg(math.atan2(dy, dx)) - LIGHT_ANGLE + 180) % 360 - 180
+            self.angleTarget = LIGHT_ANGLE + math.clamp(delta, -LIGHT_SWING, LIGHT_SWING) * pull
+            self.glareTarget = at
+            self.presenceTarget = 1
+        else
+            self.angleTarget, self.glareTarget, self.presenceTarget = LIGHT_ANGLE, GLARE_REST, 0
+        end
+        Animator.Wake(self)
+    end
+
+    return light
 end
 
 -- Liquid lens motion. A spring pulls the lens toward its target; the faster it travels the more it
@@ -1087,11 +1372,13 @@ local function LiquidMover(track, body, config, flare)
             and math.abs(self.pressTarget - self.press) < 0.002 and math.abs(self.pressVelocity) < 0.02 then
             self.value, self.velocity = target, 0
             self.press, self.pressVelocity = self.pressTarget, 0
-            render()
             return false
         end
-        render()
         return true
+    end
+
+    function mover:Render()
+        render()
     end
 
     function mover:SetTarget(value)
@@ -1295,6 +1582,7 @@ local Prefs = {
     SkipLanguage = false,
     SkipTheme = false,
     SkipFont = false,
+    GlassQuality = "High",
 }
 
 local function savePrefs()
@@ -1322,6 +1610,7 @@ end
 local function clearPrefs()
     Prefs.Language, Prefs.FontFamily = "en", "Gotham"
     Prefs.SkipLanguage, Prefs.SkipTheme, Prefs.SkipFont = false, false, false
+    Prefs.GlassQuality = "High"
     if typeof(delfile) == "function" and typeof(isfile) == "function" then
         pcall(function()
             if isfile(PREFS_FILE) then delfile(PREFS_FILE) end
@@ -1474,6 +1763,7 @@ local function applyPrefs()
     Fonts.Mono = if entry.Name == "Mono" then Fonts.Bold else FONT_MONO
     Library.FontFamily = entry.Name
     Library.Scheme.Font = Fonts.Bold
+    Library.GlassQuality = if QUALITY_RANK[Prefs.GlassQuality] then Prefs.GlassQuality else "High"
 end
 
 -- ===== 07_sound.lua =====
@@ -1667,7 +1957,9 @@ local function BuildAmbient(W)
 
     local function rebuild()
         clear()
-        kind = AmbientKinds[Library.Theme] or "none"
+        -- The particles are the one thing that animates every frame while the window just sits open, so
+        -- they are the first thing a lower glass quality gives up.
+        kind = if qualityRank() >= 3 then AmbientKinds[Library.Theme] or "none" else "none"
         if kind == "motes" then
             buildParticles(16, true, false)
         elseif kind == "embers" then
@@ -1685,10 +1977,16 @@ local function BuildAmbient(W)
         end
     end
 
-    local clock = 0
+    -- Drift is drawn every frame, but the breathing is a slow swell of a few seconds, so it is only
+    -- refreshed at BREATHE_RATE: a third of the writes for a fade nobody can see step.
+    local BREATHE_RATE = 1 / 20
+    local clock, sinceBreath = 0, math.huge
     Library:GiveSignal(RunService.Heartbeat:Connect(function(dt)
         if not W.Holder.Visible or kind == "none" then return end
         clock += dt
+        sinceBreath += dt
+        local breathe = sinceBreath >= BREATHE_RATE
+        if breathe then sinceBreath = 0 end
         for _, particle in ipairs(particles) do
             local position = particle.Frame.Position
             local y = position.Y.Scale + particle.Speed * dt * 6
@@ -1700,7 +1998,9 @@ local function BuildAmbient(W)
                 particle.Frame.Rotation += particle.Spin * dt
             end
             -- Gentle breathing so the field never looks static.
-            particle.Frame.BackgroundTransparency = math.clamp(particle.Base + math.sin(clock * 1.3 + particle.Phase) * 0.18, 0.3, 0.97)
+            if breathe then
+                particle.Frame.BackgroundTransparency = math.clamp(particle.Base + math.sin(clock * 1.3 + particle.Phase) * 0.18, 0.3, 0.97)
+            end
         end
         for _, band in ipairs(bands) do
             local position = band.Frame.Position
@@ -1723,6 +2023,7 @@ local function BuildAmbient(W)
 
     rebuild()
     W.Ambient = layer
+    W.RebuildAmbient = rebuild
 end
 
 -- ===== 09_cursor.lua =====
@@ -2453,14 +2754,7 @@ function Container:AddButton(first, second)
             Thickness = 1,
             Transparency = 0.55,
         }, body), { Color = tone })
-        New("UIGradient", {
-            Rotation = 100,
-            Transparency = NumberSequence.new({
-                NumberSequenceKeypoint.new(0, 0.05),
-                NumberSequenceKeypoint.new(0.5, 0.7),
-                NumberSequenceKeypoint.new(1, 0.3),
-            }),
-        }, rim)
+        RimLight(rim)
         Specular(body, 18, 0.5, 3)
 
         local label = Themed(Text(body, {
@@ -2511,9 +2805,14 @@ function Container:AddButton(first, second)
             Tween(scale, Motion.Press, { Scale = 0.965 })
         end)
         holder.MouseButton1Up:Connect(function() Tween(scale, Motion.Pop, { Scale = 1 }) end)
+        -- Where the press landed, so the light of the press spreads out from under the pointer.
+        local pressedAt
+        holder.InputBegan:Connect(function(input)
+            if isPointer(input) then pressedAt = Vector2.new(input.Position.X, input.Position.Y) end
+        end)
         holder.MouseButton1Click:Connect(function()
             if Button.Disabled then return end
-            Pulse(body, 3)
+            Pulse(body, 3, pressedAt)
             playSound(Button.Risky and "Close" or "Press")
             if Button.DoubleClick and not armedToken then
                 local token = {}
@@ -2714,7 +3013,8 @@ function Container:AddToggle(idx, info)
             BorderSizePixel = 0,
             ZIndex = 6,
         }, capsule), { BackgroundColor3 = "Knob" })
-        Corner(knob, KNOB_SIZE / 2)
+        -- Half the height rather than a fixed radius: the knob swells while held and must stay a pill.
+        New("UICorner", { CornerRadius = UDim.new(0.5, 0) }, knob)
         New("UIGradient", {
             Rotation = 90,
             Transparency = NumberSequence.new({
@@ -2722,14 +3022,28 @@ function Container:AddToggle(idx, info)
                 NumberSequenceKeypoint.new(1, 0.12),
             }),
         }, knob)
-        Themed(New("UIStroke", { Thickness = 1, Transparency = 0.55 }, knob), { Color = "Shadow" })
 
         -- The knob's shape comes from two springs: travel (0 = off, 1 = on) and press.
         local travel, travelVelocity, press = Toggle.Value and 1 or 0, 0, 0
+        -- How much the knob has turned to clear glass: fully while it is held or on its way across, turning
+        -- solid again as it lands. Measured by distance from where it is going rather than by speed, so
+        -- the knob doesn't blink solid at the top of its bounce, where its speed passes through zero.
+        local function glassiness()
+            local away = math.abs(travel - (Toggle.Value and 1 or 0))
+            return math.clamp(math.max(press, away * 3), 0, 1)
+        end
+        -- A solid knob sits in a dark contact line; as glass, the same stroke becomes its lit rim.
+        local knobRim = Themed(New("UIStroke", { Thickness = 1 }, knob), {
+            Color = function() return Glass.Shadow:Lerp(Glass.EdgeMid, glassiness()) end,
+            Transparency = function() return 0.55 - 0.4 * glassiness() end,
+        })
         local function drawKnob()
+            local glass = glassiness()
             local stretch = math.min(8, math.abs(travelVelocity) * 1.6) + press * 5
-            local width = KNOB_SIZE + stretch
-            local height = KNOB_SIZE - math.min(3, stretch * 0.3)
+            -- Held, the drop swells past the track like a lens lifted off it.
+            local swell = press * 6
+            local width = KNOB_SIZE + stretch + swell
+            local height = KNOB_SIZE + swell - math.min(3, stretch * 0.3)
             local inset = (CAPSULE_HEIGHT - KNOB_SIZE) / 2
             local left = inset + KNOB_SIZE / 2
             local right = CAPSULE_WIDTH - inset - KNOB_SIZE / 2
@@ -2738,6 +3052,9 @@ function Container:AddToggle(idx, info)
             center += (travel > 0.5 and -1 or 1) * (width - KNOB_SIZE) / 2 * (press > 0.01 and 1 or 0)
             knob.Position = UDim2.fromOffset(center, CAPSULE_HEIGHT / 2)
             knob.Size = UDim2.fromOffset(width, height)
+            knob.BackgroundTransparency = glass * 0.74
+            knobRim.Color = Glass.Shadow:Lerp(Glass.EdgeMid, glass)
+            knobRim.Transparency = 0.55 - 0.4 * glass
         end
         local travelSpring = Spring(520, 0.62, travel, function(value, velocity)
             travel, travelVelocity = value, velocity
@@ -3006,7 +3323,8 @@ function Container:AddSlider(idx, info)
         BorderSizePixel = 0,
         ZIndex = 6,
     }, tube), { BackgroundColor3 = "Knob" })
-    Corner(bead, SLIDER_BEAD / 2)
+    -- Half the height, not a fixed radius: the bead swells and stretches and must stay a round drop.
+    New("UICorner", { CornerRadius = UDim.new(0.5, 0) }, bead)
     Themed(New("UIStroke", { Thickness = 1.5, Transparency = 0.1 }, bead), { Color = "Accent" })
     local beadCore = Themed(New("Frame", {
         AnchorPoint = Vector2.new(0.5, 0.5),
@@ -3067,7 +3385,8 @@ function Container:AddSlider(idx, info)
     local level, levelVelocity = 0, 0
     local function draw()
         local stretch = math.min(7, math.abs(levelVelocity) * 3)
-        local size = SLIDER_BEAD + (dragging and 4 or (hovered and 2 or 0))
+        -- Held, the bead swells into a clear lens over the tube (see setDragging).
+        local size = SLIDER_BEAD + (dragging and 8 or (hovered and 2 or 0))
         fill.Size = UDim2.fromScale(level, 1)
         fillGradient.Size = UDim2.new(0, math.max(1, tube.AbsoluteSize.X / W.Scale.Scale), 1, 0)
         surfaceGlow.Position = UDim2.fromScale(level, 0.5)
@@ -3115,6 +3434,10 @@ function Container:AddSlider(idx, info)
         playSound(active and "Press" or "ToggleOff")
         Tween(bubbleScale, active and Motion.Pop or Motion.FadeOut, { Scale = active and 1 or 0 })
         Tween(chipRim, Motion.Hover, { Transparency = active and 0.35 or 0.8 })
+        -- While held, the bead turns to clear glass, so the level shows through it under its accent rim,
+        -- and settles back to a solid bead when released.
+        Tween(bead, Motion.Hover, { BackgroundTransparency = active and 0.74 or 0 })
+        Tween(beadCore, Motion.Hover, { BackgroundTransparency = active and 1 or 0 })
         draw()
     end
 
@@ -3905,7 +4228,8 @@ local function BuildKeybindFrame(screenGui)
         Visible = false,
         ZIndex = 150,
     }, screenGui)
-    PopupMaterial(frame, 12, 20)
+    -- No refraction band: the list layout below stacks every direct child, so it would become a row.
+    PopupMaterial(frame, 12, 20, false)
     New("UIPadding", {
         PaddingTop = UDim.new(0, 10),
         PaddingBottom = UDim.new(0, 10),
@@ -4513,7 +4837,8 @@ function Library:Notify(info, duration)
     }, slot)
     Corner(toast, 12)
     New("UIGradient", { Rotation = 115, Color = paneGradientColor() }, toast)
-    New("UIStroke", { Color = Glass.Rim, Transparency = Glass.BorderTransparency, Thickness = 1 }, toast)
+    local rim = New("UIStroke", { Color = Glass.Rim, Transparency = Glass.BorderTransparency, Thickness = 1 }, toast)
+    New("UIGradient", { Rotation = LIGHT_ANGLE, Transparency = RIM_LIGHT, Color = prismColor() }, rim)
     -- The accent bar is placed freely on the toast; the text stacks inside its own padded body.
     local bar = New("Frame", {
         AnchorPoint = Vector2.new(0, 0.5),
@@ -5370,7 +5695,30 @@ function Library:CreateWindow(info)
         ZIndex = 2,
     }, Main)
     local SheenCorner = Corner(Sheen, info.CornerRadius)
+    Themed(Sheen, { Visible = atQuality(2) })
     Themed(New("UIGradient", { Rotation = 90 }, Sheen), { Transparency = sheenTransparency })
+
+    -- The glare drifts toward the pointer over the glass. Its layer clips to the pane's rounded corner the
+    -- same way the ambient layer does, so the reflection never shows in the corner cut-outs.
+    local GlareLayer = New("Frame", {
+        Name = "Glare",
+        BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1),
+        ClipsDescendants = true,
+        ZIndex = 3,
+    }, Main)
+    local GlareCorner = Corner(GlareLayer, info.CornerRadius)
+    local Light = LiveLight(Main, MainPane.Lights, GlareLayer)
+    W.Light = Light
+    -- Mouse only: a touch has no hover, and a light that jumps to every tap would read as a glitch.
+    Library:GiveSignal(UserInputService.InputChanged:Connect(function(input)
+        if input.UserInputType ~= Enum.UserInputType.MouseMovement or not Holder.Visible then return end
+        Light:Point(input.Position)
+    end))
+    -- A window hidden under the pointer comes back with its light at rest, not leaning at a stale spot.
+    Holder:GetPropertyChangedSignal("Visible"):Connect(function()
+        if not Holder.Visible then Light:Point(nil) end
+    end)
 
     W.ScreenGui, W.Holder, W.Scale, W.Main = ScreenGui, Holder, Scale, Main
 
@@ -5926,7 +6274,9 @@ function Library:CreateWindow(info)
 
     local Blur
     if info.Blur then
-        Blur = New("BlurEffect", { Name = "FishyUIBlur", Size = 0 }, Lighting)
+        -- Low glass quality turns the blur off: a full-screen blur is one of the costliest things the
+        -- interface asks of the device.
+        Blur = New("BlurEffect", { Name = "FishyUIBlur", Size = 0, Enabled = qualityRank() >= 2 }, Lighting)
     end
     W.Blur = Blur
 
@@ -5968,10 +6318,9 @@ function Library:CreateWindow(info)
     ---------------------------------------------------------------------------------------------------
     function Window:SetCornerRadius(radius)
         Library.CornerRadius = radius
-        MainPane.Corner.CornerRadius = UDim.new(0, radius)
-        MainPane.Specular.Size = UDim2.new(1, -radius * 4, 0, 1)
-        MainPane.Edge.SliceScale = math.max(radius, 1) / L.SliceBaseRadius
+        ReshapePane(MainPane, radius)
         SheenCorner.CornerRadius = UDim.new(0, radius)
+        GlareCorner.CornerRadius = UDim.new(0, radius)
         -- The ambient layer clips its particles to this same corner.
         if W.AmbientCorner then W.AmbientCorner.CornerRadius = UDim.new(0, radius) end
     end
@@ -6221,10 +6570,6 @@ BuildTabs = function(W)
         self.y += self.vy * dt
         local lean = math.clamp(self.vx * 0.01, -7, 7)
         self.rotation += (lean - self.rotation) * math.min(1, dt * 14)
-        if self.entry then
-            self.entry.Position = UDim2.fromOffset(self.x + CHIP_WIDTH / 2, self.y)
-            self.entry.Rotation = self.rotation
-        end
         Indicator:Wake(0.1)
         DropSlot:Wake(0.1)
 
@@ -6238,6 +6583,13 @@ BuildTabs = function(W)
             if landed then landed() end
         end
         return false
+    end
+
+    function Carrier:Render()
+        if self.entry then
+            self.entry.Position = UDim2.fromOffset(self.x + CHIP_WIDTH / 2, self.y)
+            self.entry.Rotation = self.rotation
+        end
     end
 
     local function showDropSlot(visible)
@@ -7048,29 +7400,47 @@ BuildBubble = function(W)
 
     -- Content fades through ContentAlpha (extras also through ExtraAlpha), and every couple of seconds a
     -- pulse of light runs up the lit signal bars, like a signal being received.
+    -- Everything is written only when it changes: the fades only move while the bubble opens or closes, and
+    -- the signal pulse rests for most of its cycle, so a bubble sitting on screen costs almost nothing.
     local clock = 0
+    local drawnAlpha, drawnExtra
+    local function fade(rest, a) return 1 - (1 - rest) * a end
     Library:GiveSignal(RunService.Heartbeat:Connect(function(dt)
         if not BubbleHolder.Visible then return end
         clock += dt
         local alpha = ContentAlpha.Value
         local extra = alpha * ExtraAlpha.Value
-        local function fade(rest, a) return 1 - (1 - rest) * a end
-        Label.TextTransparency = fade(0, alpha)
-        PingLabel.TextTransparency = fade(0, alpha)
-        RegionLabel.TextTransparency = fade(0.15, alpha)
-        Divider.BackgroundTransparency = fade(0.78, alpha)
-        ExtraDivider.BackgroundTransparency = fade(0.78, extra)
-        FpsLabel.TextTransparency = fade(0.1, extra)
-        SessionLabel.TextTransparency = fade(0, extra)
+        if alpha ~= drawnAlpha or extra ~= drawnExtra then
+            drawnAlpha, drawnExtra = alpha, extra
+            Label.TextTransparency = fade(0, alpha)
+            PingLabel.TextTransparency = fade(0, alpha)
+            RegionLabel.TextTransparency = fade(0.15, alpha)
+            Divider.BackgroundTransparency = fade(0.78, alpha)
+            ExtraDivider.BackgroundTransparency = fade(0.78, extra)
+            FpsLabel.TextTransparency = fade(0.1, extra)
+            SessionLabel.TextTransparency = fade(0, extra)
+        end
 
         local color = Telemetry.StrengthColor(strength)
         for i, bar in ipairs(signalBars) do
             local lit = i <= strength
             local phase = (clock * 1.1 - (i - 1) * 0.16) % 1.8
             local pulse = if phase < 0.4 then math.sin(phase / 0.4 * math.pi) else 0
-            bar.Frame.Size = UDim2.fromOffset(L.SignalBarWidth, bar.Height + (if lit then pulse * 2 else 0))
-            bar.Frame.BackgroundColor3 = if lit then color else Glass.Glyph
-            bar.Frame.BackgroundTransparency = fade(if lit then 0.12 * (1 - pulse) else 0.72, alpha)
+            local height = bar.Height + (if lit then pulse * 2 else 0)
+            local tint = if lit then color else Glass.Glyph
+            local transparency = fade(if lit then 0.12 * (1 - pulse) else 0.72, alpha)
+            if bar.DrawnHeight ~= height then
+                bar.DrawnHeight = height
+                bar.Frame.Size = UDim2.fromOffset(L.SignalBarWidth, height)
+            end
+            if bar.DrawnTint ~= tint then
+                bar.DrawnTint = tint
+                bar.Frame.BackgroundColor3 = tint
+            end
+            if bar.DrawnTransparency ~= transparency then
+                bar.DrawnTransparency = transparency
+                bar.Frame.BackgroundTransparency = transparency
+            end
         end
     end))
 
@@ -7106,19 +7476,13 @@ BuildBubble = function(W)
     end
 
     local function shape(center, shapeSize, radius, tweenInfo)
-        local goals = {
-            { BubbleHolder, { Position = UDim2.fromOffset(center.X, center.Y), Size = UDim2.fromOffset(shapeSize.X, shapeSize.Y) } },
-            { Pane.Corner, { CornerRadius = UDim.new(0, radius) } },
-            { Pane.Edge, { SliceScale = math.max(radius, 1) / L.SliceBaseRadius } },
-            { Pane.Specular, { Size = UDim2.new(1, -radius * 4, 0, 1) } },
-        }
-        for _, pair in ipairs(goals) do
-            if tweenInfo then
-                Tween(pair[1], tweenInfo, pair[2])
-            else
-                for property, value in pairs(pair[2]) do pair[1][property] = value end
-            end
+        local goal = { Position = UDim2.fromOffset(center.X, center.Y), Size = UDim2.fromOffset(shapeSize.X, shapeSize.Y) }
+        if tweenInfo then
+            Tween(BubbleHolder, tweenInfo, goal)
+        else
+            BubbleHolder.Position, BubbleHolder.Size = goal.Position, goal.Size
         end
+        ReshapePane(Pane, radius, tweenInfo)
     end
 
     local bubbleCenter
@@ -7404,6 +7768,19 @@ BuildSatellites = function(W)
         return targets, attached
     end
 
+    -- The same, computed once per animator frame and shared. Every docked pod asks for it on every
+    -- substep, and working it out reads the window and screen geometry for every side and every pod, so
+    -- sharing one answer per frame turns dozens of engine reads per pod per frame into a handful in total.
+    -- Nothing moves the window or the carry within one Heartbeat, so the cached answer is exact.
+    local cachedFrame, cachedTargets, cachedAttached = -1, nil, nil
+    local function frameDockTargets()
+        if cachedFrame ~= Animator.Frame then
+            cachedFrame = Animator.Frame
+            cachedTargets, cachedAttached = dockTargets()
+        end
+        return cachedTargets, cachedAttached
+    end
+
     local function wakeAll()
         for _, pod in ipairs(pods) do Animator.Wake(pod) end
     end
@@ -7416,7 +7793,7 @@ BuildSatellites = function(W)
             Name = name, Title = title, Side = side or "Right", RenderSide = side or "Right",
             Order = #pods + 1, -- position within its side's stack; drag-and-drop rewrites it
             Deployed = false, Docked = true, Carried = false, Landing = false, Attached = false,
-            x = 0, y = 0, vx = 0, vy = 0, tx = 0, ty = 0, rotation = 0, lift = 0, alpha = 0, alphaTarget = 0,
+            x = 0, y = 0, vx = 0, vy = 0, tx = 0, ty = 0, rotation = 0, lift = 0, alpha = 0, alphaTarget = 0, hold = 0,
         }
 
         local frame = New("Frame", {
@@ -7535,12 +7912,6 @@ BuildSatellites = function(W)
             ZIndex = 20,
         }, frame)
 
-        local function renderAlpha()
-            body.GroupTransparency = 1 - pod.alpha
-            shadow.ImageTransparency = 1 - (1 - Glass.ShadowTransparency) * pod.alpha
-            frame.Visible = pod.alpha > 0.01
-        end
-
         local function layoutClamps(hold)
             local side = pod.RenderSide
             local vertical = isVertical(side)
@@ -7562,10 +7933,20 @@ BuildSatellites = function(W)
             end
         end
 
+        local drawnAlpha
+        local function renderAlpha()
+            -- GroupTransparency re-renders the whole CanvasGroup, so it is only written when it moves.
+            if drawnAlpha == pod.alpha then return end
+            drawnAlpha = pod.alpha
+            body.GroupTransparency = 1 - pod.alpha
+            shadow.ImageTransparency = 1 - (1 - Glass.ShadowTransparency) * pod.alpha
+            frame.Visible = pod.alpha > 0.01
+        end
+
         function pod:Step(dt)
             local target
             if self.Docked and not self.Carried then
-                local targets, attached = dockTargets()
+                local targets, attached = frameDockTargets()
                 target = targets[self] or Vector2.new(self.x, self.y)
                 self.Attached = attached[self] == true
             else
@@ -7591,14 +7972,8 @@ BuildSatellites = function(W)
             self.lift += (liftTarget - self.lift) * math.min(1, dt * 16)
             self.alpha += (self.alphaTarget - self.alpha) * math.min(1, dt * 12)
 
-            frame.Position = UDim2.fromOffset(self.x, self.y)
-            frame.Rotation = self.rotation
-            frameScale.Scale = Scale.Scale * (1 + 0.04 * self.lift)
-            renderAlpha()
-
             local distance = (target - Vector2.new(self.x, self.y)).Magnitude
-            local hold = if self.Attached and not self.Carried then math.clamp(1 - distance / 24, 0, 1) else 0
-            layoutClamps(hold)
+            self.hold = if self.Attached and not self.Carried then math.clamp(1 - distance / 24, 0, 1) else 0
 
             local resting = distance < 0.3 and math.abs(self.vx) < 2 and math.abs(self.vy) < 2
                 and math.abs(self.rotation - lean) < 0.05 and math.abs(self.lift - liftTarget) < 0.01
@@ -7606,9 +7981,15 @@ BuildSatellites = function(W)
             if not resting then return true end
             self.x, self.y = target.X, target.Y
             self.alpha, self.Landing = self.alphaTarget, false
-            frame.Position = UDim2.fromOffset(self.x, self.y)
-            renderAlpha()
             return false
+        end
+
+        function pod:Render()
+            frame.Position = UDim2.fromOffset(self.x, self.y)
+            frame.Rotation = self.rotation
+            frameScale.Scale = Scale.Scale * (1 + 0.04 * self.lift)
+            renderAlpha()
+            layoutClamps(self.hold)
         end
 
         -----------------------------------------------------------------------------------------------
@@ -9206,7 +9587,7 @@ function Library:SetTheme(name)
     for key in pairs(theme) do from[key] = Glass[key] end
     if self.ThemeMorph then self.ThemeMorph:Disconnect() end
 
-    local function blend(alpha)
+    local function blend(alpha, final)
         for key, target in pairs(theme) do
             local start = from[key]
             if typeof(start) == "number" then
@@ -9215,14 +9596,20 @@ function Library:SetTheme(name)
                 Glass[key] = start:Lerp(target, alpha)
             end
         end
-        applyTheme()
+        applyTheme(not final)
     end
 
-    local elapsed = 0
+    -- Every apply rewrites most of the interface, so the cross-fade runs at a fixed rate rather than on
+    -- every Heartbeat: a colour fade reads as smooth at this rate, and a 144 Hz display no longer repaints
+    -- the whole registry 144 times a second. The last frame always lands exactly on the new theme.
+    local elapsed, sinceApply = 0, math.huge
     self.ThemeMorph = RunService.Heartbeat:Connect(function(dt)
         elapsed += dt
+        sinceApply += dt
         local t = math.min(1, elapsed / THEME_MORPH_TIME)
-        blend(TweenService:GetValue(t, Enum.EasingStyle.Quint, Enum.EasingDirection.Out))
+        if t < 1 and sinceApply < THEME_MORPH_STEP then return end
+        sinceApply = 0
+        blend(TweenService:GetValue(t, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), t >= 1)
         if t >= 1 then
             self.ThemeMorph:Disconnect()
             self.ThemeMorph = nil
@@ -9246,6 +9633,7 @@ function Library:FactoryReset()
     self.AccentGradient = nil
     self:SetLanguage("en")
     self:SetFontFamily("Gotham")
+    self:SetGlassQuality("High")
     self:SetTheme("Amethyst")
     local window = self.Window
     if window and window.ShowSetup then
@@ -9290,6 +9678,25 @@ function Library:GetScheme()
     return copy
 end
 
+-- "High", "Balanced" or "Low", saved with the other preferences.
+--   High      every layer of the glass, the window's light following the pointer, ambient particles
+--   Balanced  the same glass with static lighting: no live light, glare, refraction band or particles
+--   Low       flat glass: no edge textures, sheen, glints, prismatic fringe, particles or background blur
+function Library:SetGlassQuality(quality)
+    if not QUALITY_RANK[quality] then return false end
+    self.GlassQuality = quality
+    Prefs.GlassQuality = quality
+    savePrefs()
+    local W = self.Window and self.Window._W
+    if W then
+        if W.Light then W.Light:Point(nil) end
+        if W.Blur then W.Blur.Enabled = qualityRank() >= 2 end
+        if W.RebuildAmbient then W.RebuildAmbient() end
+    end
+    applyTheme()
+    return true
+end
+
 function Library:SetDPIScale(percent)
     self.DPIScale = percent / 100
     if self.Window then self.Window:_rescale() end
@@ -9316,6 +9723,7 @@ function Library:Unload()
     if notifyStack then pcall(function() notifyStack:Destroy() end) end
     if notifyGui then pcall(function() notifyGui:Destroy() end) end
     table.clear(self.Registry)
+    table.clear(Applied)
 end
 
 ENV.Library = Library

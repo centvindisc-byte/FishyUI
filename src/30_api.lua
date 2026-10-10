@@ -26,7 +26,7 @@ function Library:SetTheme(name)
     for key in pairs(theme) do from[key] = Glass[key] end
     if self.ThemeMorph then self.ThemeMorph:Disconnect() end
 
-    local function blend(alpha)
+    local function blend(alpha, final)
         for key, target in pairs(theme) do
             local start = from[key]
             if typeof(start) == "number" then
@@ -35,14 +35,20 @@ function Library:SetTheme(name)
                 Glass[key] = start:Lerp(target, alpha)
             end
         end
-        applyTheme()
+        applyTheme(not final)
     end
 
-    local elapsed = 0
+    -- Every apply rewrites most of the interface, so the cross-fade runs at a fixed rate rather than on
+    -- every Heartbeat: a colour fade reads as smooth at this rate, and a 144 Hz display no longer repaints
+    -- the whole registry 144 times a second. The last frame always lands exactly on the new theme.
+    local elapsed, sinceApply = 0, math.huge
     self.ThemeMorph = RunService.Heartbeat:Connect(function(dt)
         elapsed += dt
+        sinceApply += dt
         local t = math.min(1, elapsed / THEME_MORPH_TIME)
-        blend(TweenService:GetValue(t, Enum.EasingStyle.Quint, Enum.EasingDirection.Out))
+        if t < 1 and sinceApply < THEME_MORPH_STEP then return end
+        sinceApply = 0
+        blend(TweenService:GetValue(t, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), t >= 1)
         if t >= 1 then
             self.ThemeMorph:Disconnect()
             self.ThemeMorph = nil
@@ -66,6 +72,7 @@ function Library:FactoryReset()
     self.AccentGradient = nil
     self:SetLanguage("en")
     self:SetFontFamily("Gotham")
+    self:SetGlassQuality("High")
     self:SetTheme("Amethyst")
     local window = self.Window
     if window and window.ShowSetup then
@@ -110,6 +117,25 @@ function Library:GetScheme()
     return copy
 end
 
+-- "High", "Balanced" or "Low", saved with the other preferences.
+--   High      every layer of the glass, the window's light following the pointer, ambient particles
+--   Balanced  the same glass with static lighting: no live light, glare, refraction band or particles
+--   Low       flat glass: no edge textures, sheen, glints, prismatic fringe, particles or background blur
+function Library:SetGlassQuality(quality)
+    if not QUALITY_RANK[quality] then return false end
+    self.GlassQuality = quality
+    Prefs.GlassQuality = quality
+    savePrefs()
+    local W = self.Window and self.Window._W
+    if W then
+        if W.Light then W.Light:Point(nil) end
+        if W.Blur then W.Blur.Enabled = qualityRank() >= 2 end
+        if W.RebuildAmbient then W.RebuildAmbient() end
+    end
+    applyTheme()
+    return true
+end
+
 function Library:SetDPIScale(percent)
     self.DPIScale = percent / 100
     if self.Window then self.Window:_rescale() end
@@ -136,6 +162,7 @@ function Library:Unload()
     if notifyStack then pcall(function() notifyStack:Destroy() end) end
     if notifyGui then pcall(function() notifyGui:Destroy() end) end
     table.clear(self.Registry)
+    table.clear(Applied)
 end
 
 ENV.Library = Library

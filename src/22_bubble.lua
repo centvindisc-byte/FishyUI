@@ -124,29 +124,47 @@ BuildBubble = function(W)
 
     -- Content fades through ContentAlpha (extras also through ExtraAlpha), and every couple of seconds a
     -- pulse of light runs up the lit signal bars, like a signal being received.
+    -- Everything is written only when it changes: the fades only move while the bubble opens or closes, and
+    -- the signal pulse rests for most of its cycle, so a bubble sitting on screen costs almost nothing.
     local clock = 0
+    local drawnAlpha, drawnExtra
+    local function fade(rest, a) return 1 - (1 - rest) * a end
     Library:GiveSignal(RunService.Heartbeat:Connect(function(dt)
         if not BubbleHolder.Visible then return end
         clock += dt
         local alpha = ContentAlpha.Value
         local extra = alpha * ExtraAlpha.Value
-        local function fade(rest, a) return 1 - (1 - rest) * a end
-        Label.TextTransparency = fade(0, alpha)
-        PingLabel.TextTransparency = fade(0, alpha)
-        RegionLabel.TextTransparency = fade(0.15, alpha)
-        Divider.BackgroundTransparency = fade(0.78, alpha)
-        ExtraDivider.BackgroundTransparency = fade(0.78, extra)
-        FpsLabel.TextTransparency = fade(0.1, extra)
-        SessionLabel.TextTransparency = fade(0, extra)
+        if alpha ~= drawnAlpha or extra ~= drawnExtra then
+            drawnAlpha, drawnExtra = alpha, extra
+            Label.TextTransparency = fade(0, alpha)
+            PingLabel.TextTransparency = fade(0, alpha)
+            RegionLabel.TextTransparency = fade(0.15, alpha)
+            Divider.BackgroundTransparency = fade(0.78, alpha)
+            ExtraDivider.BackgroundTransparency = fade(0.78, extra)
+            FpsLabel.TextTransparency = fade(0.1, extra)
+            SessionLabel.TextTransparency = fade(0, extra)
+        end
 
         local color = Telemetry.StrengthColor(strength)
         for i, bar in ipairs(signalBars) do
             local lit = i <= strength
             local phase = (clock * 1.1 - (i - 1) * 0.16) % 1.8
             local pulse = if phase < 0.4 then math.sin(phase / 0.4 * math.pi) else 0
-            bar.Frame.Size = UDim2.fromOffset(L.SignalBarWidth, bar.Height + (if lit then pulse * 2 else 0))
-            bar.Frame.BackgroundColor3 = if lit then color else Glass.Glyph
-            bar.Frame.BackgroundTransparency = fade(if lit then 0.12 * (1 - pulse) else 0.72, alpha)
+            local height = bar.Height + (if lit then pulse * 2 else 0)
+            local tint = if lit then color else Glass.Glyph
+            local transparency = fade(if lit then 0.12 * (1 - pulse) else 0.72, alpha)
+            if bar.DrawnHeight ~= height then
+                bar.DrawnHeight = height
+                bar.Frame.Size = UDim2.fromOffset(L.SignalBarWidth, height)
+            end
+            if bar.DrawnTint ~= tint then
+                bar.DrawnTint = tint
+                bar.Frame.BackgroundColor3 = tint
+            end
+            if bar.DrawnTransparency ~= transparency then
+                bar.DrawnTransparency = transparency
+                bar.Frame.BackgroundTransparency = transparency
+            end
         end
     end))
 
@@ -182,19 +200,13 @@ BuildBubble = function(W)
     end
 
     local function shape(center, shapeSize, radius, tweenInfo)
-        local goals = {
-            { BubbleHolder, { Position = UDim2.fromOffset(center.X, center.Y), Size = UDim2.fromOffset(shapeSize.X, shapeSize.Y) } },
-            { Pane.Corner, { CornerRadius = UDim.new(0, radius) } },
-            { Pane.Edge, { SliceScale = math.max(radius, 1) / L.SliceBaseRadius } },
-            { Pane.Specular, { Size = UDim2.new(1, -radius * 4, 0, 1) } },
-        }
-        for _, pair in ipairs(goals) do
-            if tweenInfo then
-                Tween(pair[1], tweenInfo, pair[2])
-            else
-                for property, value in pairs(pair[2]) do pair[1][property] = value end
-            end
+        local goal = { Position = UDim2.fromOffset(center.X, center.Y), Size = UDim2.fromOffset(shapeSize.X, shapeSize.Y) }
+        if tweenInfo then
+            Tween(BubbleHolder, tweenInfo, goal)
+        else
+            BubbleHolder.Position, BubbleHolder.Size = goal.Position, goal.Size
         end
+        ReshapePane(Pane, radius, tweenInfo)
     end
 
     local bubbleCenter

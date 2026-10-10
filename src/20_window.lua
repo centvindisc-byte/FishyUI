@@ -105,7 +105,30 @@ function Library:CreateWindow(info)
         ZIndex = 2,
     }, Main)
     local SheenCorner = Corner(Sheen, info.CornerRadius)
+    Themed(Sheen, { Visible = atQuality(2) })
     Themed(New("UIGradient", { Rotation = 90 }, Sheen), { Transparency = sheenTransparency })
+
+    -- The glare drifts toward the pointer over the glass. Its layer clips to the pane's rounded corner the
+    -- same way the ambient layer does, so the reflection never shows in the corner cut-outs.
+    local GlareLayer = New("Frame", {
+        Name = "Glare",
+        BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1),
+        ClipsDescendants = true,
+        ZIndex = 3,
+    }, Main)
+    local GlareCorner = Corner(GlareLayer, info.CornerRadius)
+    local Light = LiveLight(Main, MainPane.Lights, GlareLayer)
+    W.Light = Light
+    -- Mouse only: a touch has no hover, and a light that jumps to every tap would read as a glitch.
+    Library:GiveSignal(UserInputService.InputChanged:Connect(function(input)
+        if input.UserInputType ~= Enum.UserInputType.MouseMovement or not Holder.Visible then return end
+        Light:Point(input.Position)
+    end))
+    -- A window hidden under the pointer comes back with its light at rest, not leaning at a stale spot.
+    Holder:GetPropertyChangedSignal("Visible"):Connect(function()
+        if not Holder.Visible then Light:Point(nil) end
+    end)
 
     W.ScreenGui, W.Holder, W.Scale, W.Main = ScreenGui, Holder, Scale, Main
 
@@ -661,7 +684,9 @@ function Library:CreateWindow(info)
 
     local Blur
     if info.Blur then
-        Blur = New("BlurEffect", { Name = "FishyUIBlur", Size = 0 }, Lighting)
+        -- Low glass quality turns the blur off: a full-screen blur is one of the costliest things the
+        -- interface asks of the device.
+        Blur = New("BlurEffect", { Name = "FishyUIBlur", Size = 0, Enabled = qualityRank() >= 2 }, Lighting)
     end
     W.Blur = Blur
 
@@ -703,10 +728,9 @@ function Library:CreateWindow(info)
     ---------------------------------------------------------------------------------------------------
     function Window:SetCornerRadius(radius)
         Library.CornerRadius = radius
-        MainPane.Corner.CornerRadius = UDim.new(0, radius)
-        MainPane.Specular.Size = UDim2.new(1, -radius * 4, 0, 1)
-        MainPane.Edge.SliceScale = math.max(radius, 1) / L.SliceBaseRadius
+        ReshapePane(MainPane, radius)
         SheenCorner.CornerRadius = UDim.new(0, radius)
+        GlareCorner.CornerRadius = UDim.new(0, radius)
         -- The ambient layer clips its particles to this same corner.
         if W.AmbientCorner then W.AmbientCorner.CornerRadius = UDim.new(0, radius) end
     end

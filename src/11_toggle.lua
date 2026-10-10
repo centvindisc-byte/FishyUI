@@ -140,7 +140,8 @@ function Container:AddToggle(idx, info)
             BorderSizePixel = 0,
             ZIndex = 6,
         }, capsule), { BackgroundColor3 = "Knob" })
-        Corner(knob, KNOB_SIZE / 2)
+        -- Half the height rather than a fixed radius: the knob swells while held and must stay a pill.
+        New("UICorner", { CornerRadius = UDim.new(0.5, 0) }, knob)
         New("UIGradient", {
             Rotation = 90,
             Transparency = NumberSequence.new({
@@ -148,14 +149,28 @@ function Container:AddToggle(idx, info)
                 NumberSequenceKeypoint.new(1, 0.12),
             }),
         }, knob)
-        Themed(New("UIStroke", { Thickness = 1, Transparency = 0.55 }, knob), { Color = "Shadow" })
 
         -- The knob's shape comes from two springs: travel (0 = off, 1 = on) and press.
         local travel, travelVelocity, press = Toggle.Value and 1 or 0, 0, 0
+        -- How much the knob has turned to clear glass: fully while it is held or on its way across, turning
+        -- solid again as it lands. Measured by distance from where it is going rather than by speed, so
+        -- the knob doesn't blink solid at the top of its bounce, where its speed passes through zero.
+        local function glassiness()
+            local away = math.abs(travel - (Toggle.Value and 1 or 0))
+            return math.clamp(math.max(press, away * 3), 0, 1)
+        end
+        -- A solid knob sits in a dark contact line; as glass, the same stroke becomes its lit rim.
+        local knobRim = Themed(New("UIStroke", { Thickness = 1 }, knob), {
+            Color = function() return Glass.Shadow:Lerp(Glass.EdgeMid, glassiness()) end,
+            Transparency = function() return 0.55 - 0.4 * glassiness() end,
+        })
         local function drawKnob()
+            local glass = glassiness()
             local stretch = math.min(8, math.abs(travelVelocity) * 1.6) + press * 5
-            local width = KNOB_SIZE + stretch
-            local height = KNOB_SIZE - math.min(3, stretch * 0.3)
+            -- Held, the drop swells past the track like a lens lifted off it.
+            local swell = press * 6
+            local width = KNOB_SIZE + stretch + swell
+            local height = KNOB_SIZE + swell - math.min(3, stretch * 0.3)
             local inset = (CAPSULE_HEIGHT - KNOB_SIZE) / 2
             local left = inset + KNOB_SIZE / 2
             local right = CAPSULE_WIDTH - inset - KNOB_SIZE / 2
@@ -164,6 +179,9 @@ function Container:AddToggle(idx, info)
             center += (travel > 0.5 and -1 or 1) * (width - KNOB_SIZE) / 2 * (press > 0.01 and 1 or 0)
             knob.Position = UDim2.fromOffset(center, CAPSULE_HEIGHT / 2)
             knob.Size = UDim2.fromOffset(width, height)
+            knob.BackgroundTransparency = glass * 0.74
+            knobRim.Color = Glass.Shadow:Lerp(Glass.EdgeMid, glass)
+            knobRim.Transparency = 0.55 - 0.4 * glass
         end
         local travelSpring = Spring(520, 0.62, travel, function(value, velocity)
             travel, travelVelocity = value, velocity

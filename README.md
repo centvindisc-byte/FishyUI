@@ -51,8 +51,14 @@ A complete, game-agnostic showcase of every element and setting lives in
 
 Beyond API parity, FishyUI adds a set of things most Roblox UI libraries don't have:
 
-- **Liquid glass throughout** — a nine-sliced lensed edge, specular highlights and spring-driven motion.
-  Every animation runs on one shared `Heartbeat` driver that sleeps when nothing is moving.
+- **Liquid glass throughout** — one shared light source lights every surface: a dual-lobe rim (bright key
+  highlight, dark terminator, bounce on the far edge) with a faint prismatic fringe, a nine-sliced lensed
+  edge, and a refraction band just inside the far edge that gives panes real thickness. The window's light
+  leans toward the pointer and a soft glare drifts after it. Toggle knobs and slider beads turn into clear
+  glass drops while you hold or slide them. Matte themes (Onyx, Midnight) stay matte.
+- **Light on the device** — every animation runs on one shared `Heartbeat` driver that sleeps when nothing
+  is moving and draws each spring once per frame; theme changes only rewrite values that actually changed.
+  `Library:SetGlassQuality("High" | "Balanced" | "Low")` trades layers for speed on weaker devices.
 - **Ten themes that change material, not just colour** — Frost is light, Onyx is matte stone, Neon glows,
   Midnight is flat OLED black, Glacier is clearer glass.
 - **Magnetic tabs** — press and pull a sidebar tab to carry it anywhere; the others part to leave a gap
@@ -126,7 +132,15 @@ Every element registers into `Library.Options` / `Library.Toggles` and exposes `
 `Library:ApplyScheme(table)`, `Library:GetScheme()`, `Library:SetDPIScale(percent)`,
 `Library:SetNotifySide(side)`, `Library:SetLanguage(code)`, `Library:SetFontFamily(name)`,
 `Library:SetSoundEnabled(bool)`, `Library:SetSoundVolume(0-1)`, `Library:SetCursor(style)`,
-`Library:FactoryReset()`.
+`Library:SetGlassQuality(quality)`, `Library:FactoryReset()`.
+
+`SetGlassQuality` is saved with the other preferences:
+
+| Quality | What it draws |
+|---------|---------------|
+| `"High"` (default) | Every glass layer, the window's pointer-tracking light and glare, ambient particles |
+| `"Balanced"` | The same glass with static lighting: no live light, glare, refraction band or particles |
+| `"Low"` | Flat glass: no edge textures, sheen, glints, prismatic fringe, particles or background blur |
 
 ## Addons
 

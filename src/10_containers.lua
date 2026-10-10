@@ -512,14 +512,7 @@ function Container:AddButton(first, second)
             Thickness = 1,
             Transparency = 0.55,
         }, body), { Color = tone })
-        New("UIGradient", {
-            Rotation = 100,
-            Transparency = NumberSequence.new({
-                NumberSequenceKeypoint.new(0, 0.05),
-                NumberSequenceKeypoint.new(0.5, 0.7),
-                NumberSequenceKeypoint.new(1, 0.3),
-            }),
-        }, rim)
+        RimLight(rim)
         Specular(body, 18, 0.5, 3)
 
         local label = Themed(Text(body, {
@@ -570,9 +563,14 @@ function Container:AddButton(first, second)
             Tween(scale, Motion.Press, { Scale = 0.965 })
         end)
         holder.MouseButton1Up:Connect(function() Tween(scale, Motion.Pop, { Scale = 1 }) end)
+        -- Where the press landed, so the light of the press spreads out from under the pointer.
+        local pressedAt
+        holder.InputBegan:Connect(function(input)
+            if isPointer(input) then pressedAt = Vector2.new(input.Position.X, input.Position.Y) end
+        end)
         holder.MouseButton1Click:Connect(function()
             if Button.Disabled then return end
-            Pulse(body, 3)
+            Pulse(body, 3, pressedAt)
             playSound(Button.Risky and "Close" or "Press")
             if Button.DoubleClick and not armedToken then
                 local token = {}

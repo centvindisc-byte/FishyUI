@@ -209,10 +209,6 @@ BuildTabs = function(W)
         self.y += self.vy * dt
         local lean = math.clamp(self.vx * 0.01, -7, 7)
         self.rotation += (lean - self.rotation) * math.min(1, dt * 14)
-        if self.entry then
-            self.entry.Position = UDim2.fromOffset(self.x + CHIP_WIDTH / 2, self.y)
-            self.entry.Rotation = self.rotation
-        end
         Indicator:Wake(0.1)
         DropSlot:Wake(0.1)
 
@@ -226,6 +222,13 @@ BuildTabs = function(W)
             if landed then landed() end
         end
         return false
+    end
+
+    function Carrier:Render()
+        if self.entry then
+            self.entry.Position = UDim2.fromOffset(self.x + CHIP_WIDTH / 2, self.y)
+            self.entry.Rotation = self.rotation
+        end
     end
 
     local function showDropSlot(visible)
