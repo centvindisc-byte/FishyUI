@@ -91,6 +91,7 @@ function Library:SetLowGraphics(enabled)
     if W then
         if W.Blur then W.Blur.Enabled = not enabled end
         if W.RefreshAmbient then W.RefreshAmbient() end
+        if W.OnLowGraphics then W.OnLowGraphics(enabled) end
     end
     return true
 end

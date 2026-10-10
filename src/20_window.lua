@@ -689,7 +689,18 @@ function Library:CreateWindow(info)
     Telemetry.Start()
     BuildTabs(W)
     BuildBubble(W)
-    if info.Satellites then BuildSatellites(W) end
+    if info.Satellites then
+        BuildSatellites(W)
+    else
+        local function none() end
+        local stub = { SetValue = none, GetValue = none, Deploy = none, Stow = none, Remove = none, SetForm = none, SetTitle = none }
+        function Window:AddAttachment() return stub end
+        function Window:GetAttachment() return nil end
+        function Window:SaveAttachmentLayout() return false end
+        function Window:LoadAttachmentLayout() return false end
+        function Window:DeleteAttachmentLayout() return false end
+        function Window:GetAttachmentLayouts() return {} end
+    end
     BuildAmbient(W) -- wraps W.OnThemeChanged, so it has to come after that is defined
     BuildCursor(W)
     BuildRail(W)

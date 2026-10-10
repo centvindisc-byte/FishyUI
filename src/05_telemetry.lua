@@ -7,6 +7,7 @@ local Telemetry = {
     Fps = 0,
     Ping = nil,
     PingSamples = {},
+    FpsSamples = {},
     Region = "--",
     Executor = "Unknown",
     Listeners = {},
@@ -79,6 +80,8 @@ function Telemetry.Start()
         elapsed += dt
         if elapsed < 1 then return end
         Telemetry.Fps = math.floor(frames / elapsed + 0.5)
+        table.insert(Telemetry.FpsSamples, Telemetry.Fps)
+        if #Telemetry.FpsSamples > TELEMETRY_SAMPLES then table.remove(Telemetry.FpsSamples, 1) end
         frames, elapsed = 0, 0
         sample()
     end))

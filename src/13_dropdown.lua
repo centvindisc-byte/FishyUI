@@ -138,8 +138,10 @@ function Container:AddDropdown(idx, info)
         refreshDisplay()
         Library:SafeCallback(Dropdown.Callback, Dropdown.Value)
         Library:SafeCallback(Dropdown.Changed, Dropdown.Value)
+        if Dropdown.Mirror then Library:SafeCallback(Dropdown.Mirror, Dropdown.Value) end -- a pinned attachment
         Library:UpdateDependencyBoxes()
     end
+    Dropdown.Entries = entries -- the options as { Key, Label }, for the pinned attachment
 
     -------------------------------------------------------------------------------------------------
     -- Drawer
@@ -299,6 +301,7 @@ function Container:AddDropdown(idx, info)
                         Dropdown.Value = entry.Key
                     end
                     fire()
+                    Library:Log(string.format("%s: %s", tostring(Dropdown.Text or "Dropdown"), entry.Label))
                     W:ClosePopup()
                 end
             end)
@@ -362,6 +365,11 @@ function Container:AddDropdown(idx, info)
     field.MouseButton1Click:Connect(function()
         if open then W:ClosePopup() else openDrawer() end
     end)
+    -- Right-click pops the dropdown out as its own attachment.
+    field.MouseButton2Click:Connect(function()
+        if Dropdown.Disabled or not W.PinControl then return end
+        W.PinControl({ Kind = "Dropdown", Key = tostring(idx or Dropdown.Text), Title = Dropdown.Text or "Dropdown", Object = Dropdown })
+    end)
     field.MouseEnter:Connect(function()
         if not open then Tween(fieldStroke, Motion.Hover, { Transparency = 0.6 }) end
     end)
@@ -411,6 +419,7 @@ function Container:AddDropdown(idx, info)
         end
         if open then W:ClosePopup() end
         refreshDisplay()
+        if Dropdown.Mirror then Library:SafeCallback(Dropdown.Mirror, Dropdown.Value) end
     end
 
     function Dropdown:GetActiveValues()

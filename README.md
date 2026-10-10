@@ -57,10 +57,13 @@ Beyond API parity, FishyUI adds a set of things most Roblox UI libraries don't h
   Midnight is flat OLED black, Glacier is clearer glass.
 - **Magnetic tabs** — press and pull a sidebar tab to carry it anywhere; the others part to leave a gap
   and it flies back on release.
-- **Attachments** — floating info pods (session clock, performance graph, server capacity, coordinates,
-  radar) that dock to any of the window's four sides and trail it on a spring.
-- **Pin any control** — right-click a toggle or slider to pop it out as its own attachment, building a
-  HUD from the handful of controls you actually use.
+- **Attachments** — fourteen live info pods (session, performance, server, location, radar, speed, nearby
+  players, day cycle, activity feed, network, friends here, quick actions, timer, keybinds) that hang off
+  any side of the window on bridges of liquid glass. Click one to switch between card, expanded and pill;
+  pull it until the bridge tears; fling it into a screen corner; drop one on another to stack them. When
+  the window is minimised, docked pods orbit the bubble as small moons. Layouts can be saved and recalled.
+- **Pin any control** — right-click a toggle, slider, dropdown or label to pop it out as its own
+  attachment, or a button to put it on the Quick actions pad: a HUD of the controls you actually use.
 - **Edge rail** — shove the window into a screen edge and it collapses into a slim strip of tab icons.
 - **Gradient palette** — a glass gradient editor with a live preview of the controls it recolours,
   draggable stop knobs (click the track to add one), shade, hue, hex and exact-position fields, add /
@@ -130,13 +133,42 @@ Every element registers into `Library.Options` / `Library.Toggles` and exposes `
 `Library:SetSoundEnabled(bool)`, `Library:SetSoundVolume(0-1)`, `Library:SetCursor(style)`,
 `Library:SetLowGraphics(bool)`, `Library:FactoryReset()`.
 
+### Attachments
+
+```lua
+-- A pod of your own. Kind is "Stat" (a number with a trend), "Graph", "List" or "Custom".
+local coins = Window:AddAttachment({
+    Title = "Coins / hr",
+    Kind = "Graph",
+    Unit = "coins",
+    Update = function() return getCoinsPerHour() end, -- polled every Interval seconds (default 1)
+    Interval = 1,
+    Deploy = true,
+})
+coins:SetValue(1250)       -- or push values yourself
+coins:SetForm("pill")      -- "card", "expanded" or "pill"
+coins:Stow() coins:Deploy() coins:Remove()
+```
+
+A `List` pod takes an array of strings or `{ Text, Value }` rows. A `Custom` pod gets `Build = function(frame)`
+to draw into, returning a function that receives each new value. `Format = function(value)` controls how
+a value is written.
+
+`Window:SaveAttachmentLayout(name)`, `Window:LoadAttachmentLayout(name)`,
+`Window:DeleteAttachmentLayout(name)` and `Window:GetAttachmentLayouts()` keep named layouts of where
+every pod sits, its form and its stack; they are saved with the other interface preferences and also
+listed along the bottom of the attachments dock.
+
 ### Performance
 
 Animations draw once per frame however many physics substeps they take, idle UI costs nothing, and
 repaints skip properties whose value hasn't changed. For weak devices, `Library:SetLowGraphics(true)`
 turns off what is purely decorative and costly to draw: the full-screen blur, the animated backdrop, the
 lensed rims, halos and specular lines on glass surfaces, the bubble's signal pulse and the theme morph
-(themes switch instantly). It is off by default and saved like the sound and cursor settings.
+(themes switch instantly). It is off by default and saved like the sound and cursor settings. In low
+graphics mode attachments also stop orbiting (moons fan out beside the bubble instead), draw their bridges
+straight and drop the light that follows the pointer. Attachments are only built the first time they are
+deployed, so the ones you never use cost nothing.
 
 ## Addons
 

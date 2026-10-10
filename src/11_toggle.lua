@@ -215,6 +215,7 @@ function Container:AddToggle(idx, info)
         if Toggle.Disabled then return end
         Toggle:SetValue(not Toggle.Value)
         playSound(Toggle.Value and "ToggleOn" or "ToggleOff")
+        Library:Log(string.format("%s %s", tostring(Toggle.Text), Toggle.Value and "on" or "off"))
     end)
     -- Right-click pops the control out as its own satellite, so a HUD can be built from the controls
     -- actually being used. Pinning twice just re-deploys the pod that already exists.

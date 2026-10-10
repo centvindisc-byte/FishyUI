@@ -124,6 +124,7 @@ local Library = {
 
     ActivityLog = {}, -- newest-first { time, title }
     ActivityListeners = {},
+    KeybindListeners = {}, -- called after the keybind list is brought up to date
 
     CornerRadius = 14,
     DPIScale = 1,

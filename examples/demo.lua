@@ -333,14 +333,31 @@ About:UpdateWarningBox({
 local FeatureBox = About:AddLeftGroupbox("Try these")
 FeatureBox:AddLabel("Magnetic tabs — press a sidebar tab and pull. It lifts out, the others part to leave a gap, and it flies back when you let go.", true)
 FeatureBox:AddDivider()
-FeatureBox:AddLabel("Pin a control — right-click any toggle or slider to pop it out as its own floating attachment. Build a HUD from the handful you actually use.", true)
+FeatureBox:AddLabel("Pin a control — right-click any toggle, slider, dropdown or label to pop it out as its own floating attachment, or a button to put it on the Quick actions pad. Build a HUD from the handful you actually use.", true)
 FeatureBox:AddDivider()
 FeatureBox:AddLabel("Edge rail — drag the window hard into the left or right edge of the screen and it collapses to a slim strip of icons. Double-tap the rail to bring it back.", true)
 
 local PodBox = About:AddRightGroupbox("Attachments")
-PodBox:AddLabel("The attachments button top-right opens a shelf of live miniatures: session clock, performance graph, server capacity, coordinates and a radar. Click one to dock it to the window, or drag it off the shelf to place it yourself.", true)
+PodBox:AddLabel("The attachments button top-right opens a dock of live pods: session, performance, server, location, radar, speed, nearby players, day cycle, activity, network, friends, quick actions, a timer and your keybinds. Click a tile to dock it, or drag it out to place it.", true)
 PodBox:AddDivider()
-PodBox:AddLabel("Docked attachments follow the window on a spring and can sit on any of its four sides. If a side runs out of room they cross to the opposite one, and if neither fits they stay on screen with their connectors hidden rather than pointing at nothing.", true)
+PodBox:AddLabel("Click a pod to switch between card, expanded and pill. Pull a docked pod away and its bridge tears; fling it and it lands in a corner; drop it on another pod to stack them (scroll to flip through). Minimise the window and docked pods orbit the bubble.", true)
+PodBox:AddDivider()
+-- A pod made by the script. It sits in the dock with the built-in ones until you deploy it.
+local demoPod = Window:AddAttachment({
+    Title = "Demo graph",
+    Kind = "Graph",
+    Unit = "per sec",
+    Update = function() return math.random(20, 60) end,
+})
+PodBox:AddButton({ Text = "Deploy the demo graph", Func = function() demoPod:Deploy() end })
+PodBox:AddButton({ Text = "Save layout", Func = function()
+    local name = Window:SaveAttachmentLayout("Demo")
+    if name then Library:Notify({ Title = "Layout saved", Description = "Load it again from the dock.", Time = 3 }) end
+end }):AddButton({ Text = "Load layout", Func = function()
+    if not Window:LoadAttachmentLayout("Demo") then
+        Library:Notify({ Title = "No layout yet", Description = "Save one first.", Time = 3 })
+    end
+end })
 
 local ApiBox = About:AddRightGroupbox("Reading values")
 ApiBox:AddLabel("Every element registers itself, so a script reads state without keeping its own copy.", true)

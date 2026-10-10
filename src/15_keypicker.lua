@@ -57,8 +57,12 @@ end
 
 local function refreshKeybindFrame()
     keybindQueued = false
+    if Library.Unloaded then return end
+    for _, listener in ipairs(Library.KeybindListeners) do
+        Library:SafeCallback(listener)
+    end
     local frame = Library.KeybindFrame
-    if Library.Unloaded or not frame or not frame:FindFirstChild("Rows") then return end
+    if not frame or not frame:FindFirstChild("Rows") then return end
     -- Hidden: nothing to show. The list is brought up to date the moment it is made visible.
     if not frame.Visible then
         keybindDirty = true

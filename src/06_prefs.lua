@@ -11,6 +11,7 @@ local Prefs = {
     SkipTheme = false,
     SkipFont = false,
     LowGraphics = false,
+    PodLayouts = {}, -- name -> where every attachment sat; see Window:SaveAttachmentLayout
 }
 
 local function savePrefs()

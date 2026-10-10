@@ -321,10 +321,12 @@ BuildBubble = function(W)
     Hitbox.MouseEnter:Connect(function()
         Tween(Pane.Edge, Motion.Hover, { ImageTransparency = 0.22 })
         setExpanded(false)
+        if W.OnBubbleHover then W.OnBubbleHover(true) end
     end)
     Hitbox.MouseLeave:Connect(function()
         Tween(Pane.Edge, Motion.Hover, { ImageTransparency = Glass.EdgeTransparency })
         if not press then setExpanded(true) end
+        if W.OnBubbleHover then W.OnBubbleHover(false) end
     end)
     Library:GiveSignal(UserInputService.InputChanged:Connect(function(input)
         if not press or not isMove(input) then return end

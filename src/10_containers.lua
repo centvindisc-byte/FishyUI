@@ -388,7 +388,15 @@ function Container:AddLabel(first, second)
     function Label:SetText(text)
         Label.Text = text
         textInst.Text = text
+        if Label.Mirror then Library:SafeCallback(Label.Mirror, text) end -- a pinned attachment showing this label
     end
+
+    -- Right-click pins the label as its own attachment.
+    local W = self.W
+    textInst.InputBegan:Connect(function(input)
+        if input.UserInputType ~= Enum.UserInputType.MouseButton2 or not (W and W.PinControl) then return end
+        W.PinControl({ Kind = "Label", Key = idx or ("Label:" .. tostring(Label.Text)), Title = idx or "Note", Object = Label })
+    end)
 
     function Label:SetVisible(visible)
         Label.Instance.Visible = visible
@@ -594,7 +602,13 @@ function Container:AddButton(first, second)
                 return
             end
             if armedToken then disarm() end
+            Library:Log("Pressed " .. tostring(Button.Text))
             Library:SafeCallback(Button.Func)
+        end)
+        -- Right-click pins the button to the Quick actions attachment.
+        holder.MouseButton2Click:Connect(function()
+            if Button.Disabled or not W.PinControl then return end
+            W.PinControl({ Kind = "Button", Key = "Button:" .. tostring(Button.Text), Title = Button.Text, Object = Button })
         end)
         bindTooltip(W, holder, function()
             if Button.Disabled and buttonInfo.DisabledTooltip then return buttonInfo.DisabledTooltip end
