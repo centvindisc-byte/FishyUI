@@ -3528,109 +3528,136 @@ function Container:AddDropdown(idx, info)
         local lensBody = GlassLens(lensTrack, 7, 2)
         local lens = LiquidMover(lensTrack, lensBody, Springs.ListLens)
 
-        local rows = {}
+        -- Rows are built only as they scroll into view, plus a couple either side. Opening a long list used
+        -- to build every row at once (a multi-select row is ~18 instances) and each search keystroke rebuilt
+        -- them all, a visible hitch on a slow device; the rows on screen come out exactly the same.
+        local VIEW_HEIGHT = height - (10 + searchHeight)
+        local rows, shown, built = {}, {}, {}
+
+        local function buildRow(index)
+            local entry = shown[index]
+            local rowY = (index - 1) * DROPDOWN_ITEM_HEIGHT
+            local item = New("TextButton", {
+                Name = entry.Label,
+                Text = "",
+                AutoButtonColor = false,
+                BackgroundTransparency = 1,
+                Position = UDim2.fromOffset(6, rowY),
+                Size = UDim2.new(1, -12, 0, DROPDOWN_ITEM_HEIGHT),
+                ZIndex = 3,
+            }, scroller)
+            table.insert(rows, item)
+            local itemLabel = Text(item, {
+                Text = entry.Label,
+                FontFace = FONT_MEDIUM,
+                TextSize = 13,
+                Position = UDim2.fromOffset(10, 0),
+                Size = UDim2.new(1, -40, 1, 0),
+                TextColor3 = isSelected(entry.Key) and Glass.TextPrimary or Glass.TextSecondary,
+                ZIndex = 4,
+            })
+
+            local mark, reveal
+            if Dropdown.Multi then
+                mark = New("Frame", {
+                    AnchorPoint = Vector2.new(1, 0.5),
+                    Position = UDim2.new(1, -8, 0.5, 0),
+                    Size = UDim2.fromOffset(16, 16),
+                    ZIndex = 4,
+                }, item)
+                FieldMaterial(mark, 5)
+                local markFill = New("Frame", {
+                    Size = UDim2.fromScale(1, 1),
+                    BackgroundColor3 = Glass.Accent,
+                    BackgroundTransparency = isSelected(entry.Key) and 0 or 1,
+                    BorderSizePixel = 0,
+                    ZIndex = 5,
+                }, mark)
+                Corner(markFill, 5)
+                local _, draw = CheckGlyph(mark, 6)
+                draw(isSelected(entry.Key), true)
+                reveal = function(on)
+                    Tween(markFill, Motion.Hover, { BackgroundTransparency = on and 0 or 1 })
+                    draw(on)
+                end
+            else
+                mark = New("Frame", {
+                    AnchorPoint = Vector2.new(1, 0.5),
+                    Position = UDim2.new(1, -12, 0.5, 0),
+                    Size = UDim2.fromOffset(6, 6),
+                    BackgroundColor3 = Glass.Accent,
+                    BackgroundTransparency = isSelected(entry.Key) and 0 or 1,
+                    BorderSizePixel = 0,
+                    ZIndex = 4,
+                }, item)
+                Corner(mark, 3)
+                reveal = function(on) Tween(mark, Motion.Hover, { BackgroundTransparency = on and 0 or 1 }) end
+            end
+
+            item.MouseEnter:Connect(function()
+                lensTrack.Visible = true
+                lens:SetTarget(rowY)
+                if not isSelected(entry.Key) then
+                    Tween(itemLabel, Motion.Hover, { TextColor3 = Glass.TextPrimary })
+                end
+            end)
+            item.MouseLeave:Connect(function()
+                if not isSelected(entry.Key) then
+                    Tween(itemLabel, Motion.Hover, { TextColor3 = Glass.TextSecondary })
+                end
+            end)
+            item.MouseButton1Click:Connect(function()
+                if Dropdown.Multi then
+                    Dropdown.Value[entry.Key] = (not Dropdown.Value[entry.Key]) or nil
+                    reveal(isSelected(entry.Key))
+                    fire()
+                else
+                    if Dropdown.Value == entry.Key and Dropdown.AllowNull then
+                        Dropdown.Value = nil
+                    else
+                        Dropdown.Value = entry.Key
+                    end
+                    fire()
+                    W:ClosePopup()
+                end
+            end)
+        end
+
+        local function fillView()
+            local maxTop = math.max(0, #shown * DROPDOWN_ITEM_HEIGHT - VIEW_HEIGHT)
+            -- Clamped here too: after a filter shrinks the list the scroller may not have pulled its own
+            -- position back in yet, and the rows that will be in view must exist before that happens.
+            local top = math.clamp(scroller.CanvasPosition.Y, 0, maxTop)
+            local first = math.max(1, math.floor(top / DROPDOWN_ITEM_HEIGHT) - 1)
+            local last = math.min(#shown, math.ceil((top + VIEW_HEIGHT) / DROPDOWN_ITEM_HEIGHT) + 2)
+            for index = first, last do
+                if not built[index] then
+                    built[index] = true
+                    buildRow(index)
+                end
+            end
+        end
+
         local function build(filter)
             for _, row in ipairs(rows) do row:Destroy() end
             table.clear(rows)
-            local y = 0
+            table.clear(shown)
+            table.clear(built)
+            local needle = filter and filter ~= "" and filter:lower() or nil
             for _, entry in ipairs(list) do
-                if not filter or filter == "" or entry.Label:lower():find(filter:lower(), 1, true) then
-                    local rowY = y
-                    local item = New("TextButton", {
-                        Name = entry.Label,
-                        Text = "",
-                        AutoButtonColor = false,
-                        BackgroundTransparency = 1,
-                        Position = UDim2.fromOffset(6, rowY),
-                        Size = UDim2.new(1, -12, 0, DROPDOWN_ITEM_HEIGHT),
-                        ZIndex = 3,
-                    }, scroller)
-                    table.insert(rows, item)
-                    local itemLabel = Text(item, {
-                        Text = entry.Label,
-                        FontFace = FONT_MEDIUM,
-                        TextSize = 13,
-                        Position = UDim2.fromOffset(10, 0),
-                        Size = UDim2.new(1, -40, 1, 0),
-                        TextColor3 = isSelected(entry.Key) and Glass.TextPrimary or Glass.TextSecondary,
-                        ZIndex = 4,
-                    })
-
-                    local mark, reveal
-                    if Dropdown.Multi then
-                        mark = New("Frame", {
-                            AnchorPoint = Vector2.new(1, 0.5),
-                            Position = UDim2.new(1, -8, 0.5, 0),
-                            Size = UDim2.fromOffset(16, 16),
-                            ZIndex = 4,
-                        }, item)
-                        FieldMaterial(mark, 5)
-                        local markFill = New("Frame", {
-                            Size = UDim2.fromScale(1, 1),
-                            BackgroundColor3 = Glass.Accent,
-                            BackgroundTransparency = isSelected(entry.Key) and 0 or 1,
-                            BorderSizePixel = 0,
-                            ZIndex = 5,
-                        }, mark)
-                        Corner(markFill, 5)
-                        local _, draw = CheckGlyph(mark, 6)
-                        draw(isSelected(entry.Key), true)
-                        reveal = function(on)
-                            Tween(markFill, Motion.Hover, { BackgroundTransparency = on and 0 or 1 })
-                            draw(on)
-                        end
-                    else
-                        mark = New("Frame", {
-                            AnchorPoint = Vector2.new(1, 0.5),
-                            Position = UDim2.new(1, -12, 0.5, 0),
-                            Size = UDim2.fromOffset(6, 6),
-                            BackgroundColor3 = Glass.Accent,
-                            BackgroundTransparency = isSelected(entry.Key) and 0 or 1,
-                            BorderSizePixel = 0,
-                            ZIndex = 4,
-                        }, item)
-                        Corner(mark, 3)
-                        reveal = function(on) Tween(mark, Motion.Hover, { BackgroundTransparency = on and 0 or 1 }) end
-                    end
-
-                    item.MouseEnter:Connect(function()
-                        lensTrack.Visible = true
-                        lens:SetTarget(rowY)
-                        if not isSelected(entry.Key) then
-                            Tween(itemLabel, Motion.Hover, { TextColor3 = Glass.TextPrimary })
-                        end
-                    end)
-                    item.MouseLeave:Connect(function()
-                        if not isSelected(entry.Key) then
-                            Tween(itemLabel, Motion.Hover, { TextColor3 = Glass.TextSecondary })
-                        end
-                    end)
-                    item.MouseButton1Click:Connect(function()
-                        if Dropdown.Multi then
-                            Dropdown.Value[entry.Key] = (not Dropdown.Value[entry.Key]) or nil
-                            reveal(isSelected(entry.Key))
-                            fire()
-                        else
-                            if Dropdown.Value == entry.Key and Dropdown.AllowNull then
-                                Dropdown.Value = nil
-                            else
-                                Dropdown.Value = entry.Key
-                            end
-                            fire()
-                            W:ClosePopup()
-                        end
-                    end)
-
+                if not needle or entry.Label:lower():find(needle, 1, true) then
+                    table.insert(shown, entry)
                     if isSelected(entry.Key) and not lensTrack.Visible then
                         lensTrack.Visible = true
-                        lens:SetTarget(rowY)
+                        lens:SetTarget((#shown - 1) * DROPDOWN_ITEM_HEIGHT)
                         lens:Snap()
                     end
-                    y += DROPDOWN_ITEM_HEIGHT
                 end
             end
-            scroller.CanvasSize = UDim2.fromOffset(0, y)
+            scroller.CanvasSize = UDim2.fromOffset(0, #shown * DROPDOWN_ITEM_HEIGHT)
+            fillView()
         end
+        scroller:GetPropertyChangedSignal("CanvasPosition"):Connect(fillView)
         build(nil)
         if search then
             search:GetPropertyChangedSignal("Text"):Connect(function()
