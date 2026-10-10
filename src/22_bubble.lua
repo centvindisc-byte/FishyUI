@@ -124,29 +124,34 @@ BuildBubble = function(W)
 
     -- Content fades through ContentAlpha (extras also through ExtraAlpha), and every couple of seconds a
     -- pulse of light runs up the lit signal bars, like a signal being received.
+    --
+    -- The bubble is what stays on screen while you play, so this runs for as long as the menu is tucked
+    -- away. Once the fades settle almost nothing here changes from frame to frame (only a bar mid-pulse),
+    -- so writes go through a cache and the unchanged ones are dropped.
     local clock = 0
+    local put = PropertyCache()
+    local function fade(rest, a) return 1 - (1 - rest) * a end
     Library:GiveSignal(RunService.Heartbeat:Connect(function(dt)
         if not BubbleHolder.Visible then return end
         clock += dt
         local alpha = ContentAlpha.Value
         local extra = alpha * ExtraAlpha.Value
-        local function fade(rest, a) return 1 - (1 - rest) * a end
-        Label.TextTransparency = fade(0, alpha)
-        PingLabel.TextTransparency = fade(0, alpha)
-        RegionLabel.TextTransparency = fade(0.15, alpha)
-        Divider.BackgroundTransparency = fade(0.78, alpha)
-        ExtraDivider.BackgroundTransparency = fade(0.78, extra)
-        FpsLabel.TextTransparency = fade(0.1, extra)
-        SessionLabel.TextTransparency = fade(0, extra)
+        put(Label, "TextTransparency", fade(0, alpha))
+        put(PingLabel, "TextTransparency", fade(0, alpha))
+        put(RegionLabel, "TextTransparency", fade(0.15, alpha))
+        put(Divider, "BackgroundTransparency", fade(0.78, alpha))
+        put(ExtraDivider, "BackgroundTransparency", fade(0.78, extra))
+        put(FpsLabel, "TextTransparency", fade(0.1, extra))
+        put(SessionLabel, "TextTransparency", fade(0, extra))
 
         local color = Telemetry.StrengthColor(strength)
         for i, bar in ipairs(signalBars) do
             local lit = i <= strength
             local phase = (clock * 1.1 - (i - 1) * 0.16) % 1.8
             local pulse = if phase < 0.4 then math.sin(phase / 0.4 * math.pi) else 0
-            bar.Frame.Size = UDim2.fromOffset(L.SignalBarWidth, bar.Height + (if lit then pulse * 2 else 0))
-            bar.Frame.BackgroundColor3 = if lit then color else Glass.Glyph
-            bar.Frame.BackgroundTransparency = fade(if lit then 0.12 * (1 - pulse) else 0.72, alpha)
+            put(bar.Frame, "Size", UDim2.fromOffset(L.SignalBarWidth, bar.Height + (if lit then pulse * 2 else 0)))
+            put(bar.Frame, "BackgroundColor3", if lit then color else Glass.Glyph)
+            put(bar.Frame, "BackgroundTransparency", fade(if lit then 0.12 * (1 - pulse) else 0.72, alpha))
         end
     end))
 

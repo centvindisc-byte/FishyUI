@@ -15,52 +15,88 @@ local function inputBindName(input)
     return MOUSE_BIND_NAMES[input.UserInputType]
 end
 
-function Library:UpdateKeybindFrame()
-    local frame = self.KeybindFrame
-    if not frame or not frame:FindFirstChild("Rows") then return end
-    local rows = frame.Rows
-    for _, child in ipairs(rows:GetChildren()) do
-        if child:IsA("Frame") then child:Destroy() end
+-- One row per listed bind, kept between updates and repainted in place. The list used to be torn down and
+-- rebuilt on every keypress and every new keypicker, which made each press cost a handful of new
+-- instances and building a script with many binds quadratic.
+local keybindRows = {} -- picker -> { Row, State, Label, Mode }
+local keybindDirty, keybindQueued = false, false
+
+local function keybindRow(rows, picker)
+    local existing = keybindRows[picker]
+    if existing and existing.Row.Parent == rows then return existing end
+    local row = New("Frame", {
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, 20),
+    }, rows)
+    local state = New("Frame", {
+        Name = "State",
+        AnchorPoint = Vector2.new(0, 0.5),
+        Position = UDim2.new(0, 0, 0.5, 0),
+        Size = UDim2.fromOffset(6, 6),
+        BorderSizePixel = 0,
+    }, row)
+    Corner(state, 3)
+    local label = Text(row, {
+        FontFace = FONT_MEDIUM,
+        TextSize = 12,
+        Position = UDim2.fromOffset(14, 0),
+        Size = UDim2.new(1, -60, 1, 0),
+    })
+    local mode = Text(row, {
+        FontFace = FONT_MEDIUM,
+        TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.new(1, 0, 0, 0),
+        Size = UDim2.new(0, 50, 1, 0),
+    })
+    local entry = { Row = row, State = state, Label = label, Mode = mode, Paint = PropertyCache() }
+    keybindRows[picker] = entry
+    return entry
+end
+
+local function refreshKeybindFrame()
+    keybindQueued = false
+    local frame = Library.KeybindFrame
+    if Library.Unloaded or not frame or not frame:FindFirstChild("Rows") then return end
+    -- Hidden: nothing to show. The list is brought up to date the moment it is made visible.
+    if not frame.Visible then
+        keybindDirty = true
+        return
     end
-    local order = 0
+    keybindDirty = false
+    local rows = frame.Rows
+    local listed, order = {}, 0
     for _, picker in ipairs(KeybindEntries) do
         if not picker.NoUI and picker.Value ~= "None" then
             order += 1
+            listed[picker] = true
             local active = picker:GetState()
-            local row = New("Frame", {
-                BackgroundTransparency = 1,
-                Size = UDim2.new(1, 0, 0, 20),
-                LayoutOrder = order,
-            }, rows)
-            New("Frame", {
-                AnchorPoint = Vector2.new(0, 0.5),
-                Position = UDim2.new(0, 0, 0.5, 0),
-                Size = UDim2.fromOffset(6, 6),
-                BackgroundColor3 = active and Glass.Accent or Glass.Glyph,
-                BackgroundTransparency = active and 0 or 0.6,
-                BorderSizePixel = 0,
-            }, row).Name = "State"
-            Corner(row.State, 3)
-            Text(row, {
-                Text = string.format("[%s]  %s", keyDisplayName(picker.Value), picker.Text),
-                FontFace = FONT_MEDIUM,
-                TextSize = 12,
-                TextColor3 = active and Glass.TextPrimary or Glass.TextSecondary,
-                Position = UDim2.fromOffset(14, 0),
-                Size = UDim2.new(1, -60, 1, 0),
-            })
-            Text(row, {
-                Text = picker.Mode,
-                FontFace = FONT_MEDIUM,
-                TextSize = 11,
-                TextColor3 = Glass.TextMuted,
-                TextXAlignment = Enum.TextXAlignment.Right,
-                AnchorPoint = Vector2.new(1, 0),
-                Position = UDim2.new(1, 0, 0, 0),
-                Size = UDim2.new(0, 50, 1, 0),
-            })
+            local entry = keybindRow(rows, picker)
+            local paint = entry.Paint
+            paint(entry.Row, "LayoutOrder", order)
+            paint(entry.State, "BackgroundColor3", active and Glass.Accent or Glass.Glyph)
+            paint(entry.State, "BackgroundTransparency", active and 0 or 0.6)
+            paint(entry.Label, "Text", string.format("[%s]  %s", keyDisplayName(picker.Value), picker.Text))
+            paint(entry.Label, "TextColor3", active and Glass.TextPrimary or Glass.TextSecondary)
+            paint(entry.Mode, "Text", picker.Mode)
+            paint(entry.Mode, "TextColor3", Glass.TextMuted)
         end
     end
+    for picker, entry in pairs(keybindRows) do
+        if not listed[picker] then
+            entry.Row:Destroy()
+            keybindRows[picker] = nil
+        end
+    end
+end
+
+-- Several things can ask for an update in one go (a bind firing also flips its toggle, which fires
+-- again); they are folded into a single repaint before the frame is drawn.
+function Library:UpdateKeybindFrame()
+    if keybindQueued then return end
+    keybindQueued = true
+    task.defer(refreshKeybindFrame)
 end
 
 local function BuildKeybindFrame(screenGui)
@@ -95,6 +131,9 @@ local function BuildKeybindFrame(screenGui)
         LayoutOrder = 2,
     }, frame)
     stackLayout(rows, 2)
+    frame:GetPropertyChangedSignal("Visible"):Connect(function()
+        if frame.Visible and keybindDirty then refreshKeybindFrame() end
+    end)
 
     -- Drag by the title.
     title.InputBegan:Connect(function(input)

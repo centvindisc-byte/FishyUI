@@ -26,7 +26,9 @@ function Library:SetTheme(name)
     for key in pairs(theme) do from[key] = Glass[key] end
     if self.ThemeMorph then self.ThemeMorph:Disconnect() end
 
-    local function blend(alpha)
+    -- In-between frames only repaint what moved (the shared tokens and every font binding stay put); the
+    -- last frame repaints everything, so the end state is exactly what a full apply produces.
+    local function blend(alpha, final)
         for key, target in pairs(theme) do
             local start = from[key]
             if typeof(start) == "number" then
@@ -35,14 +37,14 @@ function Library:SetTheme(name)
                 Glass[key] = start:Lerp(target, alpha)
             end
         end
-        applyTheme()
+        applyTheme(not final)
     end
 
     local elapsed = 0
     self.ThemeMorph = RunService.Heartbeat:Connect(function(dt)
         elapsed += dt
         local t = math.min(1, elapsed / THEME_MORPH_TIME)
-        blend(TweenService:GetValue(t, Enum.EasingStyle.Quint, Enum.EasingDirection.Out))
+        blend(TweenService:GetValue(t, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), t >= 1)
         if t >= 1 then
             self.ThemeMorph:Disconnect()
             self.ThemeMorph = nil
@@ -135,7 +137,14 @@ function Library:Unload()
     if self.ScreenGui then pcall(function() self.ScreenGui:Destroy() end) end
     if notifyStack then pcall(function() notifyStack:Destroy() end) end
     if notifyGui then pcall(function() notifyGui:Destroy() end) end
+    -- The UI voices live in SoundService, outside the ScreenGui, so nothing above takes them with it;
+    -- every re-execution used to leave another set behind.
+    for name, sound in pairs(voiceSounds) do
+        pcall(function() sound:Destroy() end)
+        voiceSounds[name] = nil
+    end
     table.clear(self.Registry)
+    table.clear(ThemeWritten)
 end
 
 ENV.Library = Library

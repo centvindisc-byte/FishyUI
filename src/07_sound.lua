@@ -40,7 +40,8 @@ end
 -- Plays a UI voice. Silently does nothing when sound is off or the asset failed to load.
 -- Assigns the upvalue declared in 03_core.lua rather than shadowing it with a new local.
 function playSound(name)
-    if not Library.SoundEnabled then return end
+    -- After an unload a stray callback would otherwise mint a fresh Sound that nothing ever cleans up.
+    if not Library.SoundEnabled or Library.Unloaded then return end
     local voice = VOICES[name]
     if not voice then return end
     local now = os.clock()

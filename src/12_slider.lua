@@ -213,21 +213,32 @@ function Container:AddSlider(idx, info)
         return math.clamp((value - Slider.Min) / (Slider.Max - Slider.Min), 0, 1)
     end
 
+    -- The colour ramp spans the whole tube, so it only needs resizing when the tube does, not on every
+    -- frame of the level's motion. This also keeps it right after a window resize; it used to stay at the
+    -- old width until the slider next moved, leaving the fill's bare white showing past its end.
+    local function fitRamp()
+        fillGradient.Size = UDim2.new(0, math.max(1, tube.AbsoluteSize.X / W.Scale.Scale), 1, 0)
+    end
+    tube:GetPropertyChangedSignal("AbsoluteSize"):Connect(fitRamp)
+    fitRamp()
+
+    -- Ticks only change when the level crosses one (or the theme has changed since they were painted).
+    local paintTick = PropertyCache()
+
     local hovered, dragging = false, false
     local level, levelVelocity = 0, 0
     local function draw()
         local stretch = math.min(7, math.abs(levelVelocity) * 3)
         local size = SLIDER_BEAD + (dragging and 4 or (hovered and 2 or 0))
         fill.Size = UDim2.fromScale(level, 1)
-        fillGradient.Size = UDim2.new(0, math.max(1, tube.AbsoluteSize.X / W.Scale.Scale), 1, 0)
         surfaceGlow.Position = UDim2.fromScale(level, 0.5)
         bead.Position = UDim2.fromScale(level, 0.5)
         bead.Size = UDim2.fromOffset(size + stretch, size - math.min(3, stretch * 0.35))
         bubble.Position = UDim2.new(level, 0, 0, -12)
         for _, tick in ipairs(ticks) do
             local lit = tick.Pct <= level + 0.001
-            tick.Frame.BackgroundColor3 = lit and Glass.Knob or Glass.Rim
-            tick.Frame.BackgroundTransparency = lit and 0.25 or 0.55
+            paintTick(tick.Frame, "BackgroundColor3", lit and Glass.Knob or Glass.Rim)
+            paintTick(tick.Frame, "BackgroundTransparency", lit and 0.25 or 0.55)
         end
     end
     local levelSpring = Spring(420, 0.85, 0, function(value, velocity)

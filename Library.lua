@@ -405,32 +405,102 @@ local function resolveToken(source)
     return Glass[source]
 end
 
+-- The value the registry last wrote to each bound property. Every property write crosses into the engine
+-- and costs the same whether or not the value is new, and most of what a palette edit or a theme morph
+-- frame would write is unchanged (fonts, the tokens two themes share), so repaints check here first.
+local ThemeWritten = {}
+
+-- Destroyed instances are only pruned when the registry is walked, and some UI is rebuilt constantly
+-- (notifications, dropdown rows, popups), so without a periodic sweep the registry grows for the whole
+-- session holding every destroyed instance alive. The sweep is deferred so it never runs while a popup
+-- that is still being built (and so not yet parented) is half-registered.
+local REGISTRY_SWEEP_EVERY = 1000
+local registryAdds, sweepQueued = 0, false
+
+local function pruneRegistry()
+    local registry = Library.Registry
+    for inst in pairs(registry) do
+        if inst.Parent == nil then
+            registry[inst] = nil -- closed popups and destroyed rows
+            ThemeWritten[inst] = nil
+        end
+    end
+end
+
 -- Binds instance properties to the live palette. Each property maps to a token name, or to a function
 -- for values that also depend on state (the active tab's label, a toggle that is on, ...).
 -- The registry keeps strong references: Roblox can collect the Lua proxy of an instance that is still on
--- screen, which would silently drop it from a weak table. Destroyed instances are pruned on apply instead.
+-- screen, which would silently drop it from a weak table. Destroyed instances are pruned instead.
 local function Themed(inst, props)
     local bound = Library.Registry[inst]
+    local written = ThemeWritten[inst]
     if not bound then
         bound = {}
         Library.Registry[inst] = bound
+        registryAdds += 1
+        if registryAdds >= REGISTRY_SWEEP_EVERY and not sweepQueued then
+            sweepQueued = true
+            task.defer(function()
+                sweepQueued, registryAdds = false, 0
+                if not Library.Unloaded then pruneRegistry() end
+            end)
+        end
+    end
+    if not written then
+        written = {}
+        ThemeWritten[inst] = written
     end
     for property, source in pairs(props) do
+        local value = resolveToken(source)
         bound[property] = source
-        inst[property] = resolveToken(source)
+        written[property] = value
+        inst[property] = value
     end
     return inst
 end
 
-local function applyTheme()
-    for inst, bound in pairs(Library.Registry) do
-        if inst.Parent == nil then
-            Library.Registry[inst] = nil -- closed popups and destroyed rows
+-- `changedOnly` is for repaints that run often: a palette drag or each frame of a theme morph. It skips
+-- properties whose bound value is what was last written, and skips the destroyed-instance check (a write
+-- to a destroyed instance is harmless; the sweep and full repaints prune them). A full repaint writes
+-- every bound property, exactly as it always has.
+local function applyTheme(changedOnly)
+    local registry = Library.Registry
+    for inst, bound in pairs(registry) do
+        if not changedOnly and inst.Parent == nil then
+            registry[inst] = nil -- closed popups and destroyed rows
+            ThemeWritten[inst] = nil
         else
+            local written = ThemeWritten[inst]
+            if not written then
+                written = {}
+                ThemeWritten[inst] = written
+            end
             for property, source in pairs(bound) do
-                inst[property] = resolveToken(source)
+                local value = resolveToken(source)
+                if not changedOnly or written[property] ~= value then
+                    written[property] = value
+                    inst[property] = value
+                end
             end
         end
+    end
+end
+
+-- A write-through cache for properties that a single renderer owns. Per-frame renderers push the same
+-- value most frames (a settled fade, a docked pod's rotation); this drops the writes that would change
+-- nothing. Only use it where nothing else ever sets that property, or the cache would go stale.
+local function PropertyCache()
+    local last = {}
+    return function(inst, property, value)
+        local seen = last[inst]
+        if not seen then
+            seen = {}
+            last[inst] = seen
+        elseif seen[property] == value then
+            return
+        end
+        seen[property] = value
+        inst[property] = value
     end
 end
 
@@ -449,7 +519,9 @@ end
 
 function Library:SetAccentGradient(sequence)
     self.AccentGradient = sequence
-    applyTheme()
+    -- The palette editor calls this on every pointer move while a stop is dragged; only accent-bound
+    -- properties actually change.
+    applyTheme(true)
 end
 
 -- A short line for the Activity satellite. Notifications feed it too.
@@ -612,8 +684,13 @@ end
 --
 -- One Heartbeat drives every spring in the library. Objects join with Animator.Wake and leave on their
 -- own once :Step(dt) reports they have come to rest, so idle UI costs nothing.
+--
+-- Step only integrates. A frame is split into small substeps to keep stiff springs stable, but only the
+-- state after the last one is ever seen, so an object that has a :Render() draws once per frame after its
+-- substeps instead of on every one of them. That matters most on slow devices: at 20 fps a frame is
+-- twelve substeps, and drawing in each multiplied every property write by twelve.
 -------------------------------------------------------------------------------------------------------
-local Animator = { active = {}, pending = {}, stepping = false, connection = nil }
+local Animator = { active = {}, pending = {}, stepping = false, connection = nil, frame = 0 }
 local ANIMATOR_MAX_STEP = 1 / 240
 
 function Animator.Wake(object)
@@ -627,13 +704,16 @@ function Animator.Wake(object)
     Animator.connection = RunService.Heartbeat:Connect(function(dt)
         dt = math.min(dt, 1 / 20)
         local steps = math.max(1, math.ceil(dt / ANIMATOR_MAX_STEP))
+        local step = dt / steps
+        Animator.frame += 1
         Animator.stepping = true
         for object in pairs(Animator.active) do
             local moving = false
             for _ = 1, steps do
-                moving = object:Step(dt / steps)
+                moving = object:Step(step)
                 if not moving then break end
             end
+            if object.Render then object:Render() end
             if not moving then Animator.active[object] = nil end
         end
         Animator.stepping = false
@@ -666,14 +746,19 @@ local function Spring(stiffness, dampingRatio, value, onStep, epsilon)
         self.value += self.velocity * dt
         if math.abs(self.target - self.value) < epsilon and math.abs(self.velocity) < epsilon * 10 then
             self.value, self.velocity = self.target, 0
-            onStep(self.value, 0)
             return false
         end
-        onStep(self.value, self.velocity)
         return true
     end
 
+    function spring:Render()
+        onStep(self.value, self.velocity)
+    end
+
     function spring:Set(target)
+        -- Already resting there (a press released over and over, a mirror re-sent the same value): waking
+        -- would only redraw what is already on screen.
+        if target == self.target and self.value == target and self.velocity == 0 then return end
         self.target = target
         Animator.Wake(self)
     end
@@ -1069,8 +1154,15 @@ local function LiquidMover(track, body, config, flare)
         end
     end
 
+    -- The target can only move between frames (it follows tweens and layout), so a target function is
+    -- read once per frame rather than once per substep; the indicator's reads an instance property.
+    local targetFrame, frameTarget = -1, 0
+
     function mover:Step(dt)
-        local target = currentTarget()
+        if targetFrame ~= Animator.frame then
+            targetFrame, frameTarget = Animator.frame, currentTarget()
+        end
+        local target = frameTarget
         local damping = 2 * math.sqrt(config.Stiffness) * config.Damping
         self.velocity += (config.Stiffness * (target - self.value) - damping * self.velocity) * dt
         self.value += self.velocity * dt
@@ -1087,12 +1179,12 @@ local function LiquidMover(track, body, config, flare)
             and math.abs(self.pressTarget - self.press) < 0.002 and math.abs(self.pressVelocity) < 0.02 then
             self.value, self.velocity = target, 0
             self.press, self.pressVelocity = self.pressTarget, 0
-            render()
             return false
         end
-        render()
         return true
     end
+
+    mover.Render = render
 
     function mover:SetTarget(value)
         if typeof(value) == "function" then
@@ -1100,6 +1192,7 @@ local function LiquidMover(track, body, config, flare)
         else
             self.targetFn, self.target = nil, value
         end
+        targetFrame = -1 -- a new target takes effect on the very next step
         Animator.Wake(self)
     end
 
@@ -1519,7 +1612,8 @@ end
 -- Plays a UI voice. Silently does nothing when sound is off or the asset failed to load.
 -- Assigns the upvalue declared in 03_core.lua rather than shadowing it with a new local.
 function playSound(name)
-    if not Library.SoundEnabled then return end
+    -- After an unload a stray callback would otherwise mint a fresh Sound that nothing ever cleans up.
+    if not Library.SoundEnabled or Library.Unloaded then return end
     local voice = VOICES[name]
     if not voice then return end
     local now = os.clock()
@@ -1603,25 +1697,33 @@ local function BuildAmbient(W)
     end
 
     -- Drifting specks: motes, embers, snow, petals and stars all share this shape with different motion.
+    -- Each particle's position and spin live here rather than being read back off the frame every
+    -- frame: reading an instance property costs about as much as writing one.
     local function buildParticles(count, rising, petal)
         for i = 1, count do
             local size = randomBetween(2, if petal then 7 else 4)
+            local x, y = math.random(), math.random()
+            local base = randomBetween(0.45, 0.85)
+            local rotation = if petal then math.random(0, 180) else 0
             local dot = Themed(New("Frame", {
                 AnchorPoint = Vector2.new(0.5, 0.5),
-                Position = UDim2.fromScale(math.random(), math.random()),
+                Position = UDim2.fromScale(x, y),
                 Size = UDim2.fromOffset(size, if petal then size * 0.6 else size),
-                BackgroundTransparency = randomBetween(0.45, 0.85),
+                BackgroundTransparency = base,
                 BorderSizePixel = 0,
-                Rotation = if petal then math.random(0, 180) else 0,
+                Rotation = rotation,
                 ZIndex = 2,
             }, layer), { BackgroundColor3 = if kind == "embers" then "Warning" else "Accent" })
             Corner(dot, if petal then 2 else 8)
             particles[i] = {
                 Frame = dot,
+                X = x,
+                Y = y,
+                Rotation = rotation,
                 Speed = randomBetween(0.008, 0.03) * (if rising then -1 else 1),
                 Sway = randomBetween(0.003, 0.012),
                 Phase = math.random() * math.pi * 2,
-                Base = dot.BackgroundTransparency,
+                Base = base,
                 Spin = if petal then randomBetween(-20, 20) else 0,
             }
         end
@@ -1648,7 +1750,11 @@ local function BuildAmbient(W)
                     NumberSequenceKeypoint.new(1, 1),
                 }),
             }, band), { Color = accentSequence })
-            bands[i] = { Frame = band, Gradient = gradient, Speed = randomBetween(0.01, 0.035), Phase = math.random() * 6 }
+            local position = band.Position
+            bands[i] = {
+                Frame = band, Gradient = gradient, X = position.X.Scale, Y = position.Y.Scale,
+                Speed = randomBetween(0.01, 0.035), Phase = math.random() * 6,
+            }
         end
     end
 
@@ -1690,23 +1796,25 @@ local function BuildAmbient(W)
         if not W.Holder.Visible or kind == "none" then return end
         clock += dt
         for _, particle in ipairs(particles) do
-            local position = particle.Frame.Position
-            local y = position.Y.Scale + particle.Speed * dt * 6
+            local y = particle.Y + particle.Speed * dt * 6
             if y < -0.05 then y = 1.05 elseif y > 1.05 then y = -0.05 end
-            local x = position.X.Scale + math.sin(clock * 0.6 + particle.Phase) * particle.Sway * dt * 6
+            local x = particle.X + math.sin(clock * 0.6 + particle.Phase) * particle.Sway * dt * 6
             if x < -0.05 then x = 1.05 elseif x > 1.05 then x = -0.05 end
+            particle.X, particle.Y = x, y
             particle.Frame.Position = UDim2.fromScale(x, y)
             if particle.Spin ~= 0 then
-                particle.Frame.Rotation += particle.Spin * dt
+                particle.Rotation += particle.Spin * dt
+                particle.Frame.Rotation = particle.Rotation
             end
             -- Gentle breathing so the field never looks static.
             particle.Frame.BackgroundTransparency = math.clamp(particle.Base + math.sin(clock * 1.3 + particle.Phase) * 0.18, 0.3, 0.97)
         end
         for _, band in ipairs(bands) do
-            local position = band.Frame.Position
-            local x = position.X.Scale + band.Speed * dt
+            local x = band.X + band.Speed * dt
             if x > 1.3 then x = -0.3 end
-            band.Frame.Position = UDim2.fromScale(x, position.Y.Scale + math.sin(clock * 0.35 + band.Phase) * 0.0009)
+            band.X = x
+            band.Y += math.sin(clock * 0.35 + band.Phase) * 0.0009
+            band.Frame.Position = UDim2.fromScale(x, band.Y)
             band.Gradient.Rotation = math.sin(clock * 0.2 + band.Phase) * 18
         end
         for _, line in ipairs(lines) do
@@ -1860,11 +1968,16 @@ local function BuildCursor(W)
     end
 
     -- GetMouseLocation excludes the top bar, while this ScreenGui ignores the inset, so add it back.
+    -- Most frames the pointer hasn't moved, so the write is skipped unless the spot actually changed.
+    local lastX, lastY
     Library:GiveSignal(RunService.Heartbeat:Connect(function()
-        if not holder.Visible then return end
+        if current == "Default" then return end
         local inset = GuiService:GetGuiInset()
         local mouse = UserInputService:GetMouseLocation()
-        holder.Position = UDim2.fromOffset(mouse.X + inset.X, mouse.Y + inset.Y)
+        local x, y = mouse.X + inset.X, mouse.Y + inset.Y
+        if x == lastX and y == lastY then return end
+        lastX, lastY = x, y
+        holder.Position = UDim2.fromOffset(x, y)
     end))
     Library:GiveSignal(UserInputService.InputBegan:Connect(function(input)
         if holder.Visible and input.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -3063,21 +3176,32 @@ function Container:AddSlider(idx, info)
         return math.clamp((value - Slider.Min) / (Slider.Max - Slider.Min), 0, 1)
     end
 
+    -- The colour ramp spans the whole tube, so it only needs resizing when the tube does, not on every
+    -- frame of the level's motion. This also keeps it right after a window resize; it used to stay at the
+    -- old width until the slider next moved, leaving the fill's bare white showing past its end.
+    local function fitRamp()
+        fillGradient.Size = UDim2.new(0, math.max(1, tube.AbsoluteSize.X / W.Scale.Scale), 1, 0)
+    end
+    tube:GetPropertyChangedSignal("AbsoluteSize"):Connect(fitRamp)
+    fitRamp()
+
+    -- Ticks only change when the level crosses one (or the theme has changed since they were painted).
+    local paintTick = PropertyCache()
+
     local hovered, dragging = false, false
     local level, levelVelocity = 0, 0
     local function draw()
         local stretch = math.min(7, math.abs(levelVelocity) * 3)
         local size = SLIDER_BEAD + (dragging and 4 or (hovered and 2 or 0))
         fill.Size = UDim2.fromScale(level, 1)
-        fillGradient.Size = UDim2.new(0, math.max(1, tube.AbsoluteSize.X / W.Scale.Scale), 1, 0)
         surfaceGlow.Position = UDim2.fromScale(level, 0.5)
         bead.Position = UDim2.fromScale(level, 0.5)
         bead.Size = UDim2.fromOffset(size + stretch, size - math.min(3, stretch * 0.35))
         bubble.Position = UDim2.new(level, 0, 0, -12)
         for _, tick in ipairs(ticks) do
             local lit = tick.Pct <= level + 0.001
-            tick.Frame.BackgroundColor3 = lit and Glass.Knob or Glass.Rim
-            tick.Frame.BackgroundTransparency = lit and 0.25 or 0.55
+            paintTick(tick.Frame, "BackgroundColor3", lit and Glass.Knob or Glass.Rim)
+            paintTick(tick.Frame, "BackgroundTransparency", lit and 0.25 or 0.55)
         end
     end
     local levelSpring = Spring(420, 0.85, 0, function(value, velocity)
@@ -3848,52 +3972,88 @@ local function inputBindName(input)
     return MOUSE_BIND_NAMES[input.UserInputType]
 end
 
-function Library:UpdateKeybindFrame()
-    local frame = self.KeybindFrame
-    if not frame or not frame:FindFirstChild("Rows") then return end
-    local rows = frame.Rows
-    for _, child in ipairs(rows:GetChildren()) do
-        if child:IsA("Frame") then child:Destroy() end
+-- One row per listed bind, kept between updates and repainted in place. The list used to be torn down and
+-- rebuilt on every keypress and every new keypicker, which made each press cost a handful of new
+-- instances and building a script with many binds quadratic.
+local keybindRows = {} -- picker -> { Row, State, Label, Mode }
+local keybindDirty, keybindQueued = false, false
+
+local function keybindRow(rows, picker)
+    local existing = keybindRows[picker]
+    if existing and existing.Row.Parent == rows then return existing end
+    local row = New("Frame", {
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, 20),
+    }, rows)
+    local state = New("Frame", {
+        Name = "State",
+        AnchorPoint = Vector2.new(0, 0.5),
+        Position = UDim2.new(0, 0, 0.5, 0),
+        Size = UDim2.fromOffset(6, 6),
+        BorderSizePixel = 0,
+    }, row)
+    Corner(state, 3)
+    local label = Text(row, {
+        FontFace = FONT_MEDIUM,
+        TextSize = 12,
+        Position = UDim2.fromOffset(14, 0),
+        Size = UDim2.new(1, -60, 1, 0),
+    })
+    local mode = Text(row, {
+        FontFace = FONT_MEDIUM,
+        TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.new(1, 0, 0, 0),
+        Size = UDim2.new(0, 50, 1, 0),
+    })
+    local entry = { Row = row, State = state, Label = label, Mode = mode, Paint = PropertyCache() }
+    keybindRows[picker] = entry
+    return entry
+end
+
+local function refreshKeybindFrame()
+    keybindQueued = false
+    local frame = Library.KeybindFrame
+    if Library.Unloaded or not frame or not frame:FindFirstChild("Rows") then return end
+    -- Hidden: nothing to show. The list is brought up to date the moment it is made visible.
+    if not frame.Visible then
+        keybindDirty = true
+        return
     end
-    local order = 0
+    keybindDirty = false
+    local rows = frame.Rows
+    local listed, order = {}, 0
     for _, picker in ipairs(KeybindEntries) do
         if not picker.NoUI and picker.Value ~= "None" then
             order += 1
+            listed[picker] = true
             local active = picker:GetState()
-            local row = New("Frame", {
-                BackgroundTransparency = 1,
-                Size = UDim2.new(1, 0, 0, 20),
-                LayoutOrder = order,
-            }, rows)
-            New("Frame", {
-                AnchorPoint = Vector2.new(0, 0.5),
-                Position = UDim2.new(0, 0, 0.5, 0),
-                Size = UDim2.fromOffset(6, 6),
-                BackgroundColor3 = active and Glass.Accent or Glass.Glyph,
-                BackgroundTransparency = active and 0 or 0.6,
-                BorderSizePixel = 0,
-            }, row).Name = "State"
-            Corner(row.State, 3)
-            Text(row, {
-                Text = string.format("[%s]  %s", keyDisplayName(picker.Value), picker.Text),
-                FontFace = FONT_MEDIUM,
-                TextSize = 12,
-                TextColor3 = active and Glass.TextPrimary or Glass.TextSecondary,
-                Position = UDim2.fromOffset(14, 0),
-                Size = UDim2.new(1, -60, 1, 0),
-            })
-            Text(row, {
-                Text = picker.Mode,
-                FontFace = FONT_MEDIUM,
-                TextSize = 11,
-                TextColor3 = Glass.TextMuted,
-                TextXAlignment = Enum.TextXAlignment.Right,
-                AnchorPoint = Vector2.new(1, 0),
-                Position = UDim2.new(1, 0, 0, 0),
-                Size = UDim2.new(0, 50, 1, 0),
-            })
+            local entry = keybindRow(rows, picker)
+            local paint = entry.Paint
+            paint(entry.Row, "LayoutOrder", order)
+            paint(entry.State, "BackgroundColor3", active and Glass.Accent or Glass.Glyph)
+            paint(entry.State, "BackgroundTransparency", active and 0 or 0.6)
+            paint(entry.Label, "Text", string.format("[%s]  %s", keyDisplayName(picker.Value), picker.Text))
+            paint(entry.Label, "TextColor3", active and Glass.TextPrimary or Glass.TextSecondary)
+            paint(entry.Mode, "Text", picker.Mode)
+            paint(entry.Mode, "TextColor3", Glass.TextMuted)
         end
     end
+    for picker, entry in pairs(keybindRows) do
+        if not listed[picker] then
+            entry.Row:Destroy()
+            keybindRows[picker] = nil
+        end
+    end
+end
+
+-- Several things can ask for an update in one go (a bind firing also flips its toggle, which fires
+-- again); they are folded into a single repaint before the frame is drawn.
+function Library:UpdateKeybindFrame()
+    if keybindQueued then return end
+    keybindQueued = true
+    task.defer(refreshKeybindFrame)
 end
 
 local function BuildKeybindFrame(screenGui)
@@ -3928,6 +4088,9 @@ local function BuildKeybindFrame(screenGui)
         LayoutOrder = 2,
     }, frame)
     stackLayout(rows, 2)
+    frame:GetPropertyChangedSignal("Visible"):Connect(function()
+        if frame.Visible and keybindDirty then refreshKeybindFrame() end
+    end)
 
     -- Drag by the title.
     title.InputBegan:Connect(function(input)
@@ -6104,18 +6267,20 @@ BuildTabs = function(W)
         if animate then Indicator:Wake(0.7) else Indicator:Snap() end
     end
 
-    local function paintTabs()
-        for _, tab in ipairs(Window.Tabs) do
-            local on = tab == Window.ActiveTab
-            Tween(tab.Label, Motion.Hover, { TextColor3 = on and Glass.TextPrimary or Glass.TextSecondary })
-            if tab.IconImage then
-                Tween(tab.IconImage, Motion.Hover, { ImageColor3 = on and Glass.TextPrimary or Glass.Glyph })
-            end
-            for _, line in ipairs(tab.ChevronLines) do
-                Tween(line, Motion.Hover, { BackgroundColor3 = on and Glass.TextSecondary or Glass.TextMuted })
-            end
-            Tween(tab.Hover, Motion.Hover, { BackgroundTransparency = 1 })
+    local function paintTab(tab)
+        local on = tab == Window.ActiveTab
+        Tween(tab.Label, Motion.Hover, { TextColor3 = on and Glass.TextPrimary or Glass.TextSecondary })
+        if tab.IconImage then
+            Tween(tab.IconImage, Motion.Hover, { ImageColor3 = on and Glass.TextPrimary or Glass.Glyph })
         end
+        for _, line in ipairs(tab.ChevronLines) do
+            Tween(line, Motion.Hover, { BackgroundColor3 = on and Glass.TextSecondary or Glass.TextMuted })
+        end
+        Tween(tab.Hover, Motion.Hover, { BackgroundTransparency = 1 })
+    end
+
+    local function paintTabs()
+        for _, tab in ipairs(Window.Tabs) do paintTab(tab) end
     end
 
     -- Drawer effects carry a per-tab token so delayed steps from an earlier open/close never land on top
@@ -6221,12 +6386,6 @@ BuildTabs = function(W)
         self.y += self.vy * dt
         local lean = math.clamp(self.vx * 0.01, -7, 7)
         self.rotation += (lean - self.rotation) * math.min(1, dt * 14)
-        if self.entry then
-            self.entry.Position = UDim2.fromOffset(self.x + CHIP_WIDTH / 2, self.y)
-            self.entry.Rotation = self.rotation
-        end
-        Indicator:Wake(0.1)
-        DropSlot:Wake(0.1)
 
         local settled = math.abs(self.tx - self.x) < 0.3 and math.abs(self.ty - self.y) < 0.3
             and math.abs(self.vx) < 3 and math.abs(self.vy) < 3 and math.abs(self.rotation) < 0.1
@@ -6238,6 +6397,17 @@ BuildTabs = function(W)
             if landed then landed() end
         end
         return false
+    end
+
+    -- Landing hands the entry back to the sidebar and clears `entry`, so a chip that just landed is left
+    -- where the sidebar put it.
+    function Carrier:Render()
+        if self.entry then
+            self.entry.Position = UDim2.fromOffset(self.x + CHIP_WIDTH / 2, self.y)
+            self.entry.Rotation = self.rotation
+        end
+        Indicator:Wake(0.1)
+        DropSlot:Wake(0.1)
     end
 
     local function showDropSlot(visible)
@@ -6662,13 +6832,14 @@ BuildTabs = function(W)
         local programmaticScroll = 0
         Scroller:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
             if os.clock() < programmaticScroll or #Tab.Sections == 0 then return end
-            local top = Scroller.AbsolutePosition.Y
+            -- Runs on every scrolled frame: each card's position is read once, not once per comparison.
+            local top, scale = Scroller.AbsolutePosition.Y, Scale.Scale
             local current = Tab.Sections[1]
+            local currentY = current.Card.AbsolutePosition.Y
             for _, section in ipairs(Tab.Sections) do
-                if (section.Card.AbsolutePosition.Y - top) / Scale.Scale <= 48 then
-                    if not current or section.Card.AbsolutePosition.Y >= current.Card.AbsolutePosition.Y then
-                        current = section
-                    end
+                local y = if section == Tab.Sections[1] then currentY else section.Card.AbsolutePosition.Y
+                if (y - top) / scale <= 48 and y >= currentY then
+                    current, currentY = section, y
                 end
             end
             selectSection(Tab, current, false)
@@ -6890,7 +7061,9 @@ BuildTabs = function(W)
             IndicatorTrack.Visible = true
         end
         layout(false)
-        paintTabs()
+        -- Adding a tab never changes which one is active, so only the new tab needs painting. Repainting
+        -- them all made building N tabs start N² tweens.
+        paintTab(Tab)
         return Tab
     end
 
@@ -7048,29 +7221,34 @@ BuildBubble = function(W)
 
     -- Content fades through ContentAlpha (extras also through ExtraAlpha), and every couple of seconds a
     -- pulse of light runs up the lit signal bars, like a signal being received.
+    --
+    -- The bubble is what stays on screen while you play, so this runs for as long as the menu is tucked
+    -- away. Once the fades settle almost nothing here changes from frame to frame (only a bar mid-pulse),
+    -- so writes go through a cache and the unchanged ones are dropped.
     local clock = 0
+    local put = PropertyCache()
+    local function fade(rest, a) return 1 - (1 - rest) * a end
     Library:GiveSignal(RunService.Heartbeat:Connect(function(dt)
         if not BubbleHolder.Visible then return end
         clock += dt
         local alpha = ContentAlpha.Value
         local extra = alpha * ExtraAlpha.Value
-        local function fade(rest, a) return 1 - (1 - rest) * a end
-        Label.TextTransparency = fade(0, alpha)
-        PingLabel.TextTransparency = fade(0, alpha)
-        RegionLabel.TextTransparency = fade(0.15, alpha)
-        Divider.BackgroundTransparency = fade(0.78, alpha)
-        ExtraDivider.BackgroundTransparency = fade(0.78, extra)
-        FpsLabel.TextTransparency = fade(0.1, extra)
-        SessionLabel.TextTransparency = fade(0, extra)
+        put(Label, "TextTransparency", fade(0, alpha))
+        put(PingLabel, "TextTransparency", fade(0, alpha))
+        put(RegionLabel, "TextTransparency", fade(0.15, alpha))
+        put(Divider, "BackgroundTransparency", fade(0.78, alpha))
+        put(ExtraDivider, "BackgroundTransparency", fade(0.78, extra))
+        put(FpsLabel, "TextTransparency", fade(0.1, extra))
+        put(SessionLabel, "TextTransparency", fade(0, extra))
 
         local color = Telemetry.StrengthColor(strength)
         for i, bar in ipairs(signalBars) do
             local lit = i <= strength
             local phase = (clock * 1.1 - (i - 1) * 0.16) % 1.8
             local pulse = if phase < 0.4 then math.sin(phase / 0.4 * math.pi) else 0
-            bar.Frame.Size = UDim2.fromOffset(L.SignalBarWidth, bar.Height + (if lit then pulse * 2 else 0))
-            bar.Frame.BackgroundColor3 = if lit then color else Glass.Glyph
-            bar.Frame.BackgroundTransparency = fade(if lit then 0.12 * (1 - pulse) else 0.72, alpha)
+            put(bar.Frame, "Size", UDim2.fromOffset(L.SignalBarWidth, bar.Height + (if lit then pulse * 2 else 0)))
+            put(bar.Frame, "BackgroundColor3", if lit then color else Glass.Glyph)
+            put(bar.Frame, "BackgroundTransparency", fade(if lit then 0.12 * (1 - pulse) else 0.72, alpha))
         end
     end))
 
@@ -7307,18 +7485,31 @@ BuildSatellites = function(W)
     local pods = {}
     local carry -- { pod, side, index, slot }
 
-    local function windowRect()
-        local ss = ScreenGui.AbsoluteSize
-        local p, s, k = Holder.Position, Holder.Size, Scale.Scale
+    -- The screen, window and inset numbers every placement starts from. A docking pass needs them for every
+    -- pod and side, so it reads them once and passes them down; the other callers just read them fresh.
+    local function geometry()
+        return {
+            screen = ScreenGui.AbsoluteSize,
+            position = Holder.Position,
+            size = Holder.Size,
+            k = Scale.Scale,
+            top = GuiService:GetGuiInset().Y,
+        }
+    end
+
+    local function windowRect(g)
+        g = g or geometry()
+        local ss, p, s, k = g.screen, g.position, g.size, g.k
         local size = Vector2.new(s.X.Offset, s.Y.Offset) * k
         local center = Vector2.new(p.X.Scale * ss.X + p.X.Offset, p.Y.Scale * ss.Y + p.Y.Offset)
         return center - size / 2, size
     end
 
     -- Top-left of the first slot on a side, and the step between slots.
-    local function sideGeometry(side)
-        local topLeft, size = windowRect()
-        local k = Scale.Scale
+    local function sideGeometry(side, g)
+        g = g or geometry()
+        local topLeft, size = windowRect(g)
+        local k = g.k
         if side == "Right" then
             return Vector2.new(topLeft.X + size.X + POD_GAP * k, topLeft.Y + POD_EDGE_INSET * k), Vector2.new(0, (POD_H + POD_STACK_GAP) * k)
         elseif side == "Left" then
@@ -7336,28 +7527,28 @@ BuildSatellites = function(W)
         return "Top"
     end
 
-    local function fitsOnScreen(position)
-        local ss = ScreenGui.AbsoluteSize
-        local k = Scale.Scale
-        local top = GuiService:GetGuiInset().Y
-        return position.X >= 0 and position.Y >= top
+    local function fitsOnScreen(position, g)
+        g = g or geometry()
+        local ss, k = g.screen, g.k
+        return position.X >= 0 and position.Y >= g.top
             and position.X + POD_W * k <= ss.X and position.Y + POD_H * k <= ss.Y
     end
 
     -- The side a pod actually renders on: its own, or the opposite one when there's no room.
-    local function renderSide(side)
-        local anchor = sideGeometry(side)
-        if fitsOnScreen(anchor) then return side end
+    local function renderSide(side, g)
+        g = g or geometry()
+        local anchor = sideGeometry(side, g)
+        if fitsOnScreen(anchor, g) then return side end
         local other = opposite(side)
-        if fitsOnScreen((sideGeometry(other))) then return other end
+        if fitsOnScreen((sideGeometry(other, g)), g) then return other end
         return side
     end
 
-    local function clampToScreen(position)
-        local ss = ScreenGui.AbsoluteSize
-        local k = Scale.Scale
+    local function clampToScreen(position, g)
+        g = g or geometry()
+        local ss, k = g.screen, g.k
         local margin = L.BubbleMargin
-        local top = GuiService:GetGuiInset().Y + margin
+        local top = g.top + margin
         return Vector2.new(
             math.clamp(position.X, margin, math.max(margin, ss.X - POD_W * k - margin)),
             math.clamp(position.Y, top, math.max(top, ss.Y - POD_H * k - margin))
@@ -7365,12 +7556,13 @@ BuildSatellites = function(W)
     end
 
     -- Deployed, docked pods grouped by the side they render on.
-    local function columns()
+    local function columns(g)
+        g = g or geometry()
         local result = {}
         for _, side in ipairs(SIDES) do result[side] = {} end
         for _, pod in ipairs(pods) do
             if pod.Deployed and pod.Docked and pod ~= (carry and carry.pod) then
-                table.insert(result[renderSide(pod.Side)], pod)
+                table.insert(result[renderSide(pod.Side, g)], pod)
             end
         end
         for _, side in ipairs(SIDES) do
@@ -7380,18 +7572,19 @@ BuildSatellites = function(W)
     end
 
     -- Where each docked pod belongs right now, plus a reserved gap for a pod being carried onto a side.
-    local function dockTargets()
+    local function dockTargets(g)
+        g = g or geometry()
         local targets, attached = {}, {}
-        local grouped = columns()
+        local grouped = columns(g)
         for _, side in ipairs(SIDES) do
             local column = grouped[side]
             if carry and carry.side == side then
                 table.insert(column, math.clamp(carry.index, 1, #column + 1), carry)
             end
-            local origin, step = sideGeometry(side)
+            local origin, step = sideGeometry(side, g)
             for i, item in ipairs(column) do
                 local ideal = origin + step * (i - 1)
-                local clamped = clampToScreen(ideal)
+                local clamped = clampToScreen(ideal, g)
                 if item == carry then
                     carry.slot = clamped
                 else
@@ -7402,6 +7595,22 @@ BuildSatellites = function(W)
             end
         end
         return targets, attached
+    end
+
+    -- Pods read their dock slots on every physics substep, and computing them walks every pod and reads the
+    -- window and screen geometry each time. Nothing those slots depend on can change partway through an
+    -- animator frame, so the result is shared by every pod and substep of that frame.
+    local frameAt, frameGeometry, frameTargets, frameAttached = -1, nil, nil, nil
+    local function geometryThisFrame()
+        if frameAt ~= Animator.frame then
+            frameAt, frameGeometry, frameTargets, frameAttached = Animator.frame, geometry(), nil, nil
+        end
+        return frameGeometry
+    end
+    local function dockTargetsThisFrame()
+        local g = geometryThisFrame()
+        if not frameTargets then frameTargets, frameAttached = dockTargets(g) end
+        return frameTargets, frameAttached
     end
 
     local function wakeAll()
@@ -7535,13 +7744,19 @@ BuildSatellites = function(W)
             ZIndex = 20,
         }, frame)
 
+        -- Everything the pod draws goes through this cache. A docked pod that is only being trailed along
+        -- has a constant rotation, scale, fade and connector layout; only its position changes.
+        local put = PropertyCache()
+
         local function renderAlpha()
-            body.GroupTransparency = 1 - pod.alpha
-            shadow.ImageTransparency = 1 - (1 - Glass.ShadowTransparency) * pod.alpha
-            frame.Visible = pod.alpha > 0.01
+            put(body, "GroupTransparency", 1 - pod.alpha)
+            put(shadow, "ImageTransparency", 1 - (1 - Glass.ShadowTransparency) * pod.alpha)
+            put(frame, "Visible", pod.alpha > 0.01)
         end
 
-        local function layoutClamps(hold)
+        -- `alpha` is passed in rather than read from the pod: at rest the connectors keep the fade they had
+        -- on the last moving step, while the body snaps to its final fade.
+        local function layoutClamps(hold, alpha)
             local side = pod.RenderSide
             local vertical = isVertical(side)
             local along = if vertical then POD_H else POD_W
@@ -7549,27 +7764,39 @@ BuildSatellites = function(W)
             for i, clamp in ipairs(clamps) do
                 local at = if i == 1 then first else second
                 if vertical then
-                    clamp.Frame.Size = UDim2.fromOffset(POD_GAP + 6, 5)
-                    clamp.Core.Size = UDim2.new(1, -2, 0, 2)
-                    clamp.Frame.Position = UDim2.fromOffset(if side == "Left" then POD_W + POD_GAP / 2 else -POD_GAP / 2, at)
+                    put(clamp.Frame, "Size", UDim2.fromOffset(POD_GAP + 6, 5))
+                    put(clamp.Core, "Size", UDim2.new(1, -2, 0, 2))
+                    put(clamp.Frame, "Position", UDim2.fromOffset(if side == "Left" then POD_W + POD_GAP / 2 else -POD_GAP / 2, at))
                 else
-                    clamp.Frame.Size = UDim2.fromOffset(5, POD_GAP + 6)
-                    clamp.Core.Size = UDim2.new(0, 2, 1, -2)
-                    clamp.Frame.Position = UDim2.fromOffset(at, if side == "Top" then POD_H + POD_GAP / 2 else -POD_GAP / 2)
+                    put(clamp.Frame, "Size", UDim2.fromOffset(5, POD_GAP + 6))
+                    put(clamp.Core, "Size", UDim2.new(0, 2, 1, -2))
+                    put(clamp.Frame, "Position", UDim2.fromOffset(at, if side == "Top" then POD_H + POD_GAP / 2 else -POD_GAP / 2))
                 end
-                clamp.Frame.BackgroundTransparency = 1 - 0.35 * hold * pod.alpha
-                clamp.Core.BackgroundTransparency = 1 - 0.9 * hold * pod.alpha
+                put(clamp.Frame, "BackgroundTransparency", 1 - 0.35 * hold * alpha)
+                put(clamp.Core, "BackgroundTransparency", 1 - 0.9 * hold * alpha)
             end
+        end
+
+        -- Step integrates; Render draws once the frame's substeps are done. These carry what the last
+        -- step decided about the connectors over to Render.
+        local clampHold, clampAlpha = 0, 0
+
+        function pod:Render()
+            put(frame, "Position", UDim2.fromOffset(self.x, self.y))
+            put(frame, "Rotation", self.rotation)
+            put(frameScale, "Scale", Scale.Scale * (1 + 0.04 * self.lift))
+            renderAlpha()
+            layoutClamps(clampHold, clampAlpha)
         end
 
         function pod:Step(dt)
             local target
             if self.Docked and not self.Carried then
-                local targets, attached = dockTargets()
+                local targets, attached = dockTargetsThisFrame()
                 target = targets[self] or Vector2.new(self.x, self.y)
                 self.Attached = attached[self] == true
             else
-                target = clampToScreen(Vector2.new(self.tx, self.ty))
+                target = clampToScreen(Vector2.new(self.tx, self.ty), geometryThisFrame())
                 self.Attached = false
             end
 
@@ -7591,14 +7818,9 @@ BuildSatellites = function(W)
             self.lift += (liftTarget - self.lift) * math.min(1, dt * 16)
             self.alpha += (self.alphaTarget - self.alpha) * math.min(1, dt * 12)
 
-            frame.Position = UDim2.fromOffset(self.x, self.y)
-            frame.Rotation = self.rotation
-            frameScale.Scale = Scale.Scale * (1 + 0.04 * self.lift)
-            renderAlpha()
-
             local distance = (target - Vector2.new(self.x, self.y)).Magnitude
-            local hold = if self.Attached and not self.Carried then math.clamp(1 - distance / 24, 0, 1) else 0
-            layoutClamps(hold)
+            clampHold = if self.Attached and not self.Carried then math.clamp(1 - distance / 24, 0, 1) else 0
+            clampAlpha = self.alpha
 
             local resting = distance < 0.3 and math.abs(self.vx) < 2 and math.abs(self.vy) < 2
                 and math.abs(self.rotation - lean) < 0.05 and math.abs(self.lift - liftTarget) < 0.01
@@ -7606,8 +7828,6 @@ BuildSatellites = function(W)
             if not resting then return true end
             self.x, self.y = target.X, target.Y
             self.alpha, self.Landing = self.alphaTarget, false
-            frame.Position = UDim2.fromOffset(self.x, self.y)
-            renderAlpha()
             return false
         end
 
@@ -7675,10 +7895,11 @@ BuildSatellites = function(W)
         local function moveCarry(topLeft)
             if not carry or carry.pod ~= pod then return end
             carry.side = nil
+            local g = geometry()
             local best
             for _, side in ipairs(SIDES) do
-                local rendered = renderSide(side)
-                local origin = sideGeometry(rendered)
+                local rendered = renderSide(side, g)
+                local origin = sideGeometry(rendered, g)
                 local distance = if isVertical(rendered) then math.abs(topLeft.X - origin.X) else math.abs(topLeft.Y - origin.Y)
                 if distance < POD_MAGNET and (not best or distance < best.distance) then
                     best = { side = rendered, distance = distance, origin = origin }
@@ -7686,8 +7907,8 @@ BuildSatellites = function(W)
             end
             if best then
                 carry.side = best.side
-                local grouped = columns()[best.side]
-                local origin, step = sideGeometry(best.side)
+                local grouped = columns(g)[best.side]
+                local origin, step = sideGeometry(best.side, g)
                 local index = #grouped + 1
                 for i = 1, #grouped do
                     local slot = origin + step * (i - 1)
@@ -7698,7 +7919,7 @@ BuildSatellites = function(W)
                     end
                 end
                 carry.index = index
-                dockTargets() -- fills carry.slot
+                dockTargets(g) -- fills carry.slot
                 local offset = carry.slot - topLeft
                 local pull = math.clamp(1 - offset.Magnitude / POD_MAGNET, 0, 1)
                 topLeft += offset * pull * pull
@@ -7855,7 +8076,7 @@ BuildSatellites = function(W)
     ---------------------------------------------------------------------------------------------------
     -- Location
     ---------------------------------------------------------------------------------------------------
-    local _, locBody = makePod("Location", "LOCATION", "Left")
+    local locPod, locBody = makePod("Location", "LOCATION", "Left")
     local coordLabels = {}
     for i, axis in ipairs({ "X", "Y", "Z" }) do
         Themed(Text(locBody, {
@@ -7896,7 +8117,7 @@ BuildSatellites = function(W)
     -- Radar
     ---------------------------------------------------------------------------------------------------
     local RADAR_RANGE = 220
-    local _, radarBody = makePod("Radar", "RADAR", "Left")
+    local radarPod, radarBody = makePod("Radar", "RADAR", "Left")
     local dish = New("Frame", {
         AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(POD_W - 54, POD_H / 2 + 6),
         Size = UDim2.fromOffset(72, 72), BackgroundTransparency = 1, ZIndex = 3,
@@ -8003,11 +8224,18 @@ BuildSatellites = function(W)
         if anyVisible() then refresh() end
     end)
 
-    local locationAccrued = 0
+    -- Runs every frame whether or not anything is deployed, so the open check uses the pods' own fade
+    -- (the body's GroupTransparency is drawn from it) instead of reading two instance properties.
+    local locationAccrued, sweepAngle = 0, 0
+    -- At 15 Hz most of these come out the same as last time (standing still, players out of range).
+    local live = PropertyCache()
     Library:GiveSignal(RunService.Heartbeat:Connect(function(dt)
-        local locOpen = locBody.GroupTransparency < 0.99
-        local radarOpen = radarBody.GroupTransparency < 0.99
-        if radarOpen then sweepPivot.Rotation = (sweepPivot.Rotation + dt * 150) % 360 end
+        local locOpen = 1 - locPod.alpha < 0.99
+        local radarOpen = 1 - radarPod.alpha < 0.99
+        if radarOpen then
+            sweepAngle = (sweepAngle + dt * 150) % 360
+            sweepPivot.Rotation = sweepAngle
+        end
         if not (locOpen or radarOpen) then return end
         locationAccrued += dt
         if locationAccrued < 1 / 15 then return end
@@ -8020,13 +8248,13 @@ BuildSatellites = function(W)
         if locOpen then
             if root then
                 local p = root.Position
-                coordLabels[1].Text = string.format("%.1f", p.X)
-                coordLabels[2].Text = string.format("%.1f", p.Y)
-                coordLabels[3].Text = string.format("%.1f", p.Z)
+                live(coordLabels[1], "Text", string.format("%.1f", p.X))
+                live(coordLabels[2], "Text", string.format("%.1f", p.Y))
+                live(coordLabels[3], "Text", string.format("%.1f", p.Z))
             end
             if camera then
                 local look = camera.CFrame.LookVector
-                needle.Rotation = math.deg(math.atan2(look.X, look.Z))
+                live(needle, "Rotation", math.deg(math.atan2(look.X, look.Z)))
             end
         end
 
@@ -8042,19 +8270,20 @@ BuildSatellites = function(W)
                 local blip = radarBlip(i)
                 local otherRoot = player ~= Players.LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart")
                 local offset = otherRoot and (otherRoot.Position - origin)
-                if offset and offset.Magnitude <= RADAR_RANGE then
+                local distance = offset and offset.Magnitude
+                if distance and distance <= RADAR_RANGE then
                     nearby += 1
                     local rx = (offset.X * cos - offset.Z * sin) / RADAR_RANGE * radius
                     local ry = (offset.X * sin + offset.Z * cos) / RADAR_RANGE * radius
-                    blip.Position = UDim2.new(0.5, rx, 0.5, ry)
-                    blip.BackgroundColor3 = if offset.Magnitude < RADAR_RANGE * 0.5 then Glass.Danger else Glass.Warning
-                    blip.Visible = true
+                    live(blip, "Position", UDim2.new(0.5, rx, 0.5, ry))
+                    live(blip, "BackgroundColor3", if distance < RADAR_RANGE * 0.5 then Glass.Danger else Glass.Warning)
+                    live(blip, "Visible", true)
                 else
-                    blip.Visible = false
+                    live(blip, "Visible", false)
                 end
             end
-            for i = #list + 1, #blips do blips[i].Visible = false end
-            countValue.Text = tostring(nearby)
+            for i = #list + 1, #blips do live(blips[i], "Visible", false) end
+            live(countValue, "Text", tostring(nearby))
         end
     end))
 
@@ -9206,7 +9435,9 @@ function Library:SetTheme(name)
     for key in pairs(theme) do from[key] = Glass[key] end
     if self.ThemeMorph then self.ThemeMorph:Disconnect() end
 
-    local function blend(alpha)
+    -- In-between frames only repaint what moved (the shared tokens and every font binding stay put); the
+    -- last frame repaints everything, so the end state is exactly what a full apply produces.
+    local function blend(alpha, final)
         for key, target in pairs(theme) do
             local start = from[key]
             if typeof(start) == "number" then
@@ -9215,14 +9446,14 @@ function Library:SetTheme(name)
                 Glass[key] = start:Lerp(target, alpha)
             end
         end
-        applyTheme()
+        applyTheme(not final)
     end
 
     local elapsed = 0
     self.ThemeMorph = RunService.Heartbeat:Connect(function(dt)
         elapsed += dt
         local t = math.min(1, elapsed / THEME_MORPH_TIME)
-        blend(TweenService:GetValue(t, Enum.EasingStyle.Quint, Enum.EasingDirection.Out))
+        blend(TweenService:GetValue(t, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), t >= 1)
         if t >= 1 then
             self.ThemeMorph:Disconnect()
             self.ThemeMorph = nil
@@ -9315,7 +9546,14 @@ function Library:Unload()
     if self.ScreenGui then pcall(function() self.ScreenGui:Destroy() end) end
     if notifyStack then pcall(function() notifyStack:Destroy() end) end
     if notifyGui then pcall(function() notifyGui:Destroy() end) end
+    -- The UI voices live in SoundService, outside the ScreenGui, so nothing above takes them with it;
+    -- every re-execution used to leave another set behind.
+    for name, sound in pairs(voiceSounds) do
+        pcall(function() sound:Destroy() end)
+        voiceSounds[name] = nil
+    end
     table.clear(self.Registry)
+    table.clear(ThemeWritten)
 end
 
 ENV.Library = Library

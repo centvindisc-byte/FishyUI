@@ -176,32 +176,102 @@ local function resolveToken(source)
     return Glass[source]
 end
 
+-- The value the registry last wrote to each bound property. Every property write crosses into the engine
+-- and costs the same whether or not the value is new, and most of what a palette edit or a theme morph
+-- frame would write is unchanged (fonts, the tokens two themes share), so repaints check here first.
+local ThemeWritten = {}
+
+-- Destroyed instances are only pruned when the registry is walked, and some UI is rebuilt constantly
+-- (notifications, dropdown rows, popups), so without a periodic sweep the registry grows for the whole
+-- session holding every destroyed instance alive. The sweep is deferred so it never runs while a popup
+-- that is still being built (and so not yet parented) is half-registered.
+local REGISTRY_SWEEP_EVERY = 1000
+local registryAdds, sweepQueued = 0, false
+
+local function pruneRegistry()
+    local registry = Library.Registry
+    for inst in pairs(registry) do
+        if inst.Parent == nil then
+            registry[inst] = nil -- closed popups and destroyed rows
+            ThemeWritten[inst] = nil
+        end
+    end
+end
+
 -- Binds instance properties to the live palette. Each property maps to a token name, or to a function
 -- for values that also depend on state (the active tab's label, a toggle that is on, ...).
 -- The registry keeps strong references: Roblox can collect the Lua proxy of an instance that is still on
--- screen, which would silently drop it from a weak table. Destroyed instances are pruned on apply instead.
+-- screen, which would silently drop it from a weak table. Destroyed instances are pruned instead.
 local function Themed(inst, props)
     local bound = Library.Registry[inst]
+    local written = ThemeWritten[inst]
     if not bound then
         bound = {}
         Library.Registry[inst] = bound
+        registryAdds += 1
+        if registryAdds >= REGISTRY_SWEEP_EVERY and not sweepQueued then
+            sweepQueued = true
+            task.defer(function()
+                sweepQueued, registryAdds = false, 0
+                if not Library.Unloaded then pruneRegistry() end
+            end)
+        end
+    end
+    if not written then
+        written = {}
+        ThemeWritten[inst] = written
     end
     for property, source in pairs(props) do
+        local value = resolveToken(source)
         bound[property] = source
-        inst[property] = resolveToken(source)
+        written[property] = value
+        inst[property] = value
     end
     return inst
 end
 
-local function applyTheme()
-    for inst, bound in pairs(Library.Registry) do
-        if inst.Parent == nil then
-            Library.Registry[inst] = nil -- closed popups and destroyed rows
+-- `changedOnly` is for repaints that run often: a palette drag or each frame of a theme morph. It skips
+-- properties whose bound value is what was last written, and skips the destroyed-instance check (a write
+-- to a destroyed instance is harmless; the sweep and full repaints prune them). A full repaint writes
+-- every bound property, exactly as it always has.
+local function applyTheme(changedOnly)
+    local registry = Library.Registry
+    for inst, bound in pairs(registry) do
+        if not changedOnly and inst.Parent == nil then
+            registry[inst] = nil -- closed popups and destroyed rows
+            ThemeWritten[inst] = nil
         else
+            local written = ThemeWritten[inst]
+            if not written then
+                written = {}
+                ThemeWritten[inst] = written
+            end
             for property, source in pairs(bound) do
-                inst[property] = resolveToken(source)
+                local value = resolveToken(source)
+                if not changedOnly or written[property] ~= value then
+                    written[property] = value
+                    inst[property] = value
+                end
             end
         end
+    end
+end
+
+-- A write-through cache for properties that a single renderer owns. Per-frame renderers push the same
+-- value most frames (a settled fade, a docked pod's rotation); this drops the writes that would change
+-- nothing. Only use it where nothing else ever sets that property, or the cache would go stale.
+local function PropertyCache()
+    local last = {}
+    return function(inst, property, value)
+        local seen = last[inst]
+        if not seen then
+            seen = {}
+            last[inst] = seen
+        elseif seen[property] == value then
+            return
+        end
+        seen[property] = value
+        inst[property] = value
     end
 end
 
@@ -220,7 +290,9 @@ end
 
 function Library:SetAccentGradient(sequence)
     self.AccentGradient = sequence
-    applyTheme()
+    -- The palette editor calls this on every pointer move while a stop is dragged; only accent-bound
+    -- properties actually change.
+    applyTheme(true)
 end
 
 -- A short line for the Activity satellite. Notifications feed it too.
@@ -383,8 +455,13 @@ end
 --
 -- One Heartbeat drives every spring in the library. Objects join with Animator.Wake and leave on their
 -- own once :Step(dt) reports they have come to rest, so idle UI costs nothing.
+--
+-- Step only integrates. A frame is split into small substeps to keep stiff springs stable, but only the
+-- state after the last one is ever seen, so an object that has a :Render() draws once per frame after its
+-- substeps instead of on every one of them. That matters most on slow devices: at 20 fps a frame is
+-- twelve substeps, and drawing in each multiplied every property write by twelve.
 -------------------------------------------------------------------------------------------------------
-local Animator = { active = {}, pending = {}, stepping = false, connection = nil }
+local Animator = { active = {}, pending = {}, stepping = false, connection = nil, frame = 0 }
 local ANIMATOR_MAX_STEP = 1 / 240
 
 function Animator.Wake(object)
@@ -398,13 +475,16 @@ function Animator.Wake(object)
     Animator.connection = RunService.Heartbeat:Connect(function(dt)
         dt = math.min(dt, 1 / 20)
         local steps = math.max(1, math.ceil(dt / ANIMATOR_MAX_STEP))
+        local step = dt / steps
+        Animator.frame += 1
         Animator.stepping = true
         for object in pairs(Animator.active) do
             local moving = false
             for _ = 1, steps do
-                moving = object:Step(dt / steps)
+                moving = object:Step(step)
                 if not moving then break end
             end
+            if object.Render then object:Render() end
             if not moving then Animator.active[object] = nil end
         end
         Animator.stepping = false
@@ -437,14 +517,19 @@ local function Spring(stiffness, dampingRatio, value, onStep, epsilon)
         self.value += self.velocity * dt
         if math.abs(self.target - self.value) < epsilon and math.abs(self.velocity) < epsilon * 10 then
             self.value, self.velocity = self.target, 0
-            onStep(self.value, 0)
             return false
         end
-        onStep(self.value, self.velocity)
         return true
     end
 
+    function spring:Render()
+        onStep(self.value, self.velocity)
+    end
+
     function spring:Set(target)
+        -- Already resting there (a press released over and over, a mirror re-sent the same value): waking
+        -- would only redraw what is already on screen.
+        if target == self.target and self.value == target and self.velocity == 0 then return end
         self.target = target
         Animator.Wake(self)
     end

@@ -43,25 +43,33 @@ local function BuildAmbient(W)
     end
 
     -- Drifting specks: motes, embers, snow, petals and stars all share this shape with different motion.
+    -- Each particle's position and spin live here rather than being read back off the frame every
+    -- frame: reading an instance property costs about as much as writing one.
     local function buildParticles(count, rising, petal)
         for i = 1, count do
             local size = randomBetween(2, if petal then 7 else 4)
+            local x, y = math.random(), math.random()
+            local base = randomBetween(0.45, 0.85)
+            local rotation = if petal then math.random(0, 180) else 0
             local dot = Themed(New("Frame", {
                 AnchorPoint = Vector2.new(0.5, 0.5),
-                Position = UDim2.fromScale(math.random(), math.random()),
+                Position = UDim2.fromScale(x, y),
                 Size = UDim2.fromOffset(size, if petal then size * 0.6 else size),
-                BackgroundTransparency = randomBetween(0.45, 0.85),
+                BackgroundTransparency = base,
                 BorderSizePixel = 0,
-                Rotation = if petal then math.random(0, 180) else 0,
+                Rotation = rotation,
                 ZIndex = 2,
             }, layer), { BackgroundColor3 = if kind == "embers" then "Warning" else "Accent" })
             Corner(dot, if petal then 2 else 8)
             particles[i] = {
                 Frame = dot,
+                X = x,
+                Y = y,
+                Rotation = rotation,
                 Speed = randomBetween(0.008, 0.03) * (if rising then -1 else 1),
                 Sway = randomBetween(0.003, 0.012),
                 Phase = math.random() * math.pi * 2,
-                Base = dot.BackgroundTransparency,
+                Base = base,
                 Spin = if petal then randomBetween(-20, 20) else 0,
             }
         end
@@ -88,7 +96,11 @@ local function BuildAmbient(W)
                     NumberSequenceKeypoint.new(1, 1),
                 }),
             }, band), { Color = accentSequence })
-            bands[i] = { Frame = band, Gradient = gradient, Speed = randomBetween(0.01, 0.035), Phase = math.random() * 6 }
+            local position = band.Position
+            bands[i] = {
+                Frame = band, Gradient = gradient, X = position.X.Scale, Y = position.Y.Scale,
+                Speed = randomBetween(0.01, 0.035), Phase = math.random() * 6,
+            }
         end
     end
 
@@ -130,23 +142,25 @@ local function BuildAmbient(W)
         if not W.Holder.Visible or kind == "none" then return end
         clock += dt
         for _, particle in ipairs(particles) do
-            local position = particle.Frame.Position
-            local y = position.Y.Scale + particle.Speed * dt * 6
+            local y = particle.Y + particle.Speed * dt * 6
             if y < -0.05 then y = 1.05 elseif y > 1.05 then y = -0.05 end
-            local x = position.X.Scale + math.sin(clock * 0.6 + particle.Phase) * particle.Sway * dt * 6
+            local x = particle.X + math.sin(clock * 0.6 + particle.Phase) * particle.Sway * dt * 6
             if x < -0.05 then x = 1.05 elseif x > 1.05 then x = -0.05 end
+            particle.X, particle.Y = x, y
             particle.Frame.Position = UDim2.fromScale(x, y)
             if particle.Spin ~= 0 then
-                particle.Frame.Rotation += particle.Spin * dt
+                particle.Rotation += particle.Spin * dt
+                particle.Frame.Rotation = particle.Rotation
             end
             -- Gentle breathing so the field never looks static.
             particle.Frame.BackgroundTransparency = math.clamp(particle.Base + math.sin(clock * 1.3 + particle.Phase) * 0.18, 0.3, 0.97)
         end
         for _, band in ipairs(bands) do
-            local position = band.Frame.Position
-            local x = position.X.Scale + band.Speed * dt
+            local x = band.X + band.Speed * dt
             if x > 1.3 then x = -0.3 end
-            band.Frame.Position = UDim2.fromScale(x, position.Y.Scale + math.sin(clock * 0.35 + band.Phase) * 0.0009)
+            band.X = x
+            band.Y += math.sin(clock * 0.35 + band.Phase) * 0.0009
+            band.Frame.Position = UDim2.fromScale(x, band.Y)
             band.Gradient.Rotation = math.sin(clock * 0.2 + band.Phase) * 18
         end
         for _, line in ipairs(lines) do

@@ -35,18 +35,31 @@ BuildSatellites = function(W)
     local pods = {}
     local carry -- { pod, side, index, slot }
 
-    local function windowRect()
-        local ss = ScreenGui.AbsoluteSize
-        local p, s, k = Holder.Position, Holder.Size, Scale.Scale
+    -- The screen, window and inset numbers every placement starts from. A docking pass needs them for every
+    -- pod and side, so it reads them once and passes them down; the other callers just read them fresh.
+    local function geometry()
+        return {
+            screen = ScreenGui.AbsoluteSize,
+            position = Holder.Position,
+            size = Holder.Size,
+            k = Scale.Scale,
+            top = GuiService:GetGuiInset().Y,
+        }
+    end
+
+    local function windowRect(g)
+        g = g or geometry()
+        local ss, p, s, k = g.screen, g.position, g.size, g.k
         local size = Vector2.new(s.X.Offset, s.Y.Offset) * k
         local center = Vector2.new(p.X.Scale * ss.X + p.X.Offset, p.Y.Scale * ss.Y + p.Y.Offset)
         return center - size / 2, size
     end
 
     -- Top-left of the first slot on a side, and the step between slots.
-    local function sideGeometry(side)
-        local topLeft, size = windowRect()
-        local k = Scale.Scale
+    local function sideGeometry(side, g)
+        g = g or geometry()
+        local topLeft, size = windowRect(g)
+        local k = g.k
         if side == "Right" then
             return Vector2.new(topLeft.X + size.X + POD_GAP * k, topLeft.Y + POD_EDGE_INSET * k), Vector2.new(0, (POD_H + POD_STACK_GAP) * k)
         elseif side == "Left" then
@@ -64,28 +77,28 @@ BuildSatellites = function(W)
         return "Top"
     end
 
-    local function fitsOnScreen(position)
-        local ss = ScreenGui.AbsoluteSize
-        local k = Scale.Scale
-        local top = GuiService:GetGuiInset().Y
-        return position.X >= 0 and position.Y >= top
+    local function fitsOnScreen(position, g)
+        g = g or geometry()
+        local ss, k = g.screen, g.k
+        return position.X >= 0 and position.Y >= g.top
             and position.X + POD_W * k <= ss.X and position.Y + POD_H * k <= ss.Y
     end
 
     -- The side a pod actually renders on: its own, or the opposite one when there's no room.
-    local function renderSide(side)
-        local anchor = sideGeometry(side)
-        if fitsOnScreen(anchor) then return side end
+    local function renderSide(side, g)
+        g = g or geometry()
+        local anchor = sideGeometry(side, g)
+        if fitsOnScreen(anchor, g) then return side end
         local other = opposite(side)
-        if fitsOnScreen((sideGeometry(other))) then return other end
+        if fitsOnScreen((sideGeometry(other, g)), g) then return other end
         return side
     end
 
-    local function clampToScreen(position)
-        local ss = ScreenGui.AbsoluteSize
-        local k = Scale.Scale
+    local function clampToScreen(position, g)
+        g = g or geometry()
+        local ss, k = g.screen, g.k
         local margin = L.BubbleMargin
-        local top = GuiService:GetGuiInset().Y + margin
+        local top = g.top + margin
         return Vector2.new(
             math.clamp(position.X, margin, math.max(margin, ss.X - POD_W * k - margin)),
             math.clamp(position.Y, top, math.max(top, ss.Y - POD_H * k - margin))
@@ -93,12 +106,13 @@ BuildSatellites = function(W)
     end
 
     -- Deployed, docked pods grouped by the side they render on.
-    local function columns()
+    local function columns(g)
+        g = g or geometry()
         local result = {}
         for _, side in ipairs(SIDES) do result[side] = {} end
         for _, pod in ipairs(pods) do
             if pod.Deployed and pod.Docked and pod ~= (carry and carry.pod) then
-                table.insert(result[renderSide(pod.Side)], pod)
+                table.insert(result[renderSide(pod.Side, g)], pod)
             end
         end
         for _, side in ipairs(SIDES) do
@@ -108,18 +122,19 @@ BuildSatellites = function(W)
     end
 
     -- Where each docked pod belongs right now, plus a reserved gap for a pod being carried onto a side.
-    local function dockTargets()
+    local function dockTargets(g)
+        g = g or geometry()
         local targets, attached = {}, {}
-        local grouped = columns()
+        local grouped = columns(g)
         for _, side in ipairs(SIDES) do
             local column = grouped[side]
             if carry and carry.side == side then
                 table.insert(column, math.clamp(carry.index, 1, #column + 1), carry)
             end
-            local origin, step = sideGeometry(side)
+            local origin, step = sideGeometry(side, g)
             for i, item in ipairs(column) do
                 local ideal = origin + step * (i - 1)
-                local clamped = clampToScreen(ideal)
+                local clamped = clampToScreen(ideal, g)
                 if item == carry then
                     carry.slot = clamped
                 else
@@ -130,6 +145,22 @@ BuildSatellites = function(W)
             end
         end
         return targets, attached
+    end
+
+    -- Pods read their dock slots on every physics substep, and computing them walks every pod and reads the
+    -- window and screen geometry each time. Nothing those slots depend on can change partway through an
+    -- animator frame, so the result is shared by every pod and substep of that frame.
+    local frameAt, frameGeometry, frameTargets, frameAttached = -1, nil, nil, nil
+    local function geometryThisFrame()
+        if frameAt ~= Animator.frame then
+            frameAt, frameGeometry, frameTargets, frameAttached = Animator.frame, geometry(), nil, nil
+        end
+        return frameGeometry
+    end
+    local function dockTargetsThisFrame()
+        local g = geometryThisFrame()
+        if not frameTargets then frameTargets, frameAttached = dockTargets(g) end
+        return frameTargets, frameAttached
     end
 
     local function wakeAll()
@@ -263,13 +294,19 @@ BuildSatellites = function(W)
             ZIndex = 20,
         }, frame)
 
+        -- Everything the pod draws goes through this cache. A docked pod that is only being trailed along
+        -- has a constant rotation, scale, fade and connector layout; only its position changes.
+        local put = PropertyCache()
+
         local function renderAlpha()
-            body.GroupTransparency = 1 - pod.alpha
-            shadow.ImageTransparency = 1 - (1 - Glass.ShadowTransparency) * pod.alpha
-            frame.Visible = pod.alpha > 0.01
+            put(body, "GroupTransparency", 1 - pod.alpha)
+            put(shadow, "ImageTransparency", 1 - (1 - Glass.ShadowTransparency) * pod.alpha)
+            put(frame, "Visible", pod.alpha > 0.01)
         end
 
-        local function layoutClamps(hold)
+        -- `alpha` is passed in rather than read from the pod: at rest the connectors keep the fade they had
+        -- on the last moving step, while the body snaps to its final fade.
+        local function layoutClamps(hold, alpha)
             local side = pod.RenderSide
             local vertical = isVertical(side)
             local along = if vertical then POD_H else POD_W
@@ -277,27 +314,39 @@ BuildSatellites = function(W)
             for i, clamp in ipairs(clamps) do
                 local at = if i == 1 then first else second
                 if vertical then
-                    clamp.Frame.Size = UDim2.fromOffset(POD_GAP + 6, 5)
-                    clamp.Core.Size = UDim2.new(1, -2, 0, 2)
-                    clamp.Frame.Position = UDim2.fromOffset(if side == "Left" then POD_W + POD_GAP / 2 else -POD_GAP / 2, at)
+                    put(clamp.Frame, "Size", UDim2.fromOffset(POD_GAP + 6, 5))
+                    put(clamp.Core, "Size", UDim2.new(1, -2, 0, 2))
+                    put(clamp.Frame, "Position", UDim2.fromOffset(if side == "Left" then POD_W + POD_GAP / 2 else -POD_GAP / 2, at))
                 else
-                    clamp.Frame.Size = UDim2.fromOffset(5, POD_GAP + 6)
-                    clamp.Core.Size = UDim2.new(0, 2, 1, -2)
-                    clamp.Frame.Position = UDim2.fromOffset(at, if side == "Top" then POD_H + POD_GAP / 2 else -POD_GAP / 2)
+                    put(clamp.Frame, "Size", UDim2.fromOffset(5, POD_GAP + 6))
+                    put(clamp.Core, "Size", UDim2.new(0, 2, 1, -2))
+                    put(clamp.Frame, "Position", UDim2.fromOffset(at, if side == "Top" then POD_H + POD_GAP / 2 else -POD_GAP / 2))
                 end
-                clamp.Frame.BackgroundTransparency = 1 - 0.35 * hold * pod.alpha
-                clamp.Core.BackgroundTransparency = 1 - 0.9 * hold * pod.alpha
+                put(clamp.Frame, "BackgroundTransparency", 1 - 0.35 * hold * alpha)
+                put(clamp.Core, "BackgroundTransparency", 1 - 0.9 * hold * alpha)
             end
+        end
+
+        -- Step integrates; Render draws once the frame's substeps are done. These carry what the last
+        -- step decided about the connectors over to Render.
+        local clampHold, clampAlpha = 0, 0
+
+        function pod:Render()
+            put(frame, "Position", UDim2.fromOffset(self.x, self.y))
+            put(frame, "Rotation", self.rotation)
+            put(frameScale, "Scale", Scale.Scale * (1 + 0.04 * self.lift))
+            renderAlpha()
+            layoutClamps(clampHold, clampAlpha)
         end
 
         function pod:Step(dt)
             local target
             if self.Docked and not self.Carried then
-                local targets, attached = dockTargets()
+                local targets, attached = dockTargetsThisFrame()
                 target = targets[self] or Vector2.new(self.x, self.y)
                 self.Attached = attached[self] == true
             else
-                target = clampToScreen(Vector2.new(self.tx, self.ty))
+                target = clampToScreen(Vector2.new(self.tx, self.ty), geometryThisFrame())
                 self.Attached = false
             end
 
@@ -319,14 +368,9 @@ BuildSatellites = function(W)
             self.lift += (liftTarget - self.lift) * math.min(1, dt * 16)
             self.alpha += (self.alphaTarget - self.alpha) * math.min(1, dt * 12)
 
-            frame.Position = UDim2.fromOffset(self.x, self.y)
-            frame.Rotation = self.rotation
-            frameScale.Scale = Scale.Scale * (1 + 0.04 * self.lift)
-            renderAlpha()
-
             local distance = (target - Vector2.new(self.x, self.y)).Magnitude
-            local hold = if self.Attached and not self.Carried then math.clamp(1 - distance / 24, 0, 1) else 0
-            layoutClamps(hold)
+            clampHold = if self.Attached and not self.Carried then math.clamp(1 - distance / 24, 0, 1) else 0
+            clampAlpha = self.alpha
 
             local resting = distance < 0.3 and math.abs(self.vx) < 2 and math.abs(self.vy) < 2
                 and math.abs(self.rotation - lean) < 0.05 and math.abs(self.lift - liftTarget) < 0.01
@@ -334,8 +378,6 @@ BuildSatellites = function(W)
             if not resting then return true end
             self.x, self.y = target.X, target.Y
             self.alpha, self.Landing = self.alphaTarget, false
-            frame.Position = UDim2.fromOffset(self.x, self.y)
-            renderAlpha()
             return false
         end
 
@@ -403,10 +445,11 @@ BuildSatellites = function(W)
         local function moveCarry(topLeft)
             if not carry or carry.pod ~= pod then return end
             carry.side = nil
+            local g = geometry()
             local best
             for _, side in ipairs(SIDES) do
-                local rendered = renderSide(side)
-                local origin = sideGeometry(rendered)
+                local rendered = renderSide(side, g)
+                local origin = sideGeometry(rendered, g)
                 local distance = if isVertical(rendered) then math.abs(topLeft.X - origin.X) else math.abs(topLeft.Y - origin.Y)
                 if distance < POD_MAGNET and (not best or distance < best.distance) then
                     best = { side = rendered, distance = distance, origin = origin }
@@ -414,8 +457,8 @@ BuildSatellites = function(W)
             end
             if best then
                 carry.side = best.side
-                local grouped = columns()[best.side]
-                local origin, step = sideGeometry(best.side)
+                local grouped = columns(g)[best.side]
+                local origin, step = sideGeometry(best.side, g)
                 local index = #grouped + 1
                 for i = 1, #grouped do
                     local slot = origin + step * (i - 1)
@@ -426,7 +469,7 @@ BuildSatellites = function(W)
                     end
                 end
                 carry.index = index
-                dockTargets() -- fills carry.slot
+                dockTargets(g) -- fills carry.slot
                 local offset = carry.slot - topLeft
                 local pull = math.clamp(1 - offset.Magnitude / POD_MAGNET, 0, 1)
                 topLeft += offset * pull * pull
@@ -583,7 +626,7 @@ BuildSatellites = function(W)
     ---------------------------------------------------------------------------------------------------
     -- Location
     ---------------------------------------------------------------------------------------------------
-    local _, locBody = makePod("Location", "LOCATION", "Left")
+    local locPod, locBody = makePod("Location", "LOCATION", "Left")
     local coordLabels = {}
     for i, axis in ipairs({ "X", "Y", "Z" }) do
         Themed(Text(locBody, {
@@ -624,7 +667,7 @@ BuildSatellites = function(W)
     -- Radar
     ---------------------------------------------------------------------------------------------------
     local RADAR_RANGE = 220
-    local _, radarBody = makePod("Radar", "RADAR", "Left")
+    local radarPod, radarBody = makePod("Radar", "RADAR", "Left")
     local dish = New("Frame", {
         AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(POD_W - 54, POD_H / 2 + 6),
         Size = UDim2.fromOffset(72, 72), BackgroundTransparency = 1, ZIndex = 3,
@@ -731,11 +774,18 @@ BuildSatellites = function(W)
         if anyVisible() then refresh() end
     end)
 
-    local locationAccrued = 0
+    -- Runs every frame whether or not anything is deployed, so the open check uses the pods' own fade
+    -- (the body's GroupTransparency is drawn from it) instead of reading two instance properties.
+    local locationAccrued, sweepAngle = 0, 0
+    -- At 15 Hz most of these come out the same as last time (standing still, players out of range).
+    local live = PropertyCache()
     Library:GiveSignal(RunService.Heartbeat:Connect(function(dt)
-        local locOpen = locBody.GroupTransparency < 0.99
-        local radarOpen = radarBody.GroupTransparency < 0.99
-        if radarOpen then sweepPivot.Rotation = (sweepPivot.Rotation + dt * 150) % 360 end
+        local locOpen = 1 - locPod.alpha < 0.99
+        local radarOpen = 1 - radarPod.alpha < 0.99
+        if radarOpen then
+            sweepAngle = (sweepAngle + dt * 150) % 360
+            sweepPivot.Rotation = sweepAngle
+        end
         if not (locOpen or radarOpen) then return end
         locationAccrued += dt
         if locationAccrued < 1 / 15 then return end
@@ -748,13 +798,13 @@ BuildSatellites = function(W)
         if locOpen then
             if root then
                 local p = root.Position
-                coordLabels[1].Text = string.format("%.1f", p.X)
-                coordLabels[2].Text = string.format("%.1f", p.Y)
-                coordLabels[3].Text = string.format("%.1f", p.Z)
+                live(coordLabels[1], "Text", string.format("%.1f", p.X))
+                live(coordLabels[2], "Text", string.format("%.1f", p.Y))
+                live(coordLabels[3], "Text", string.format("%.1f", p.Z))
             end
             if camera then
                 local look = camera.CFrame.LookVector
-                needle.Rotation = math.deg(math.atan2(look.X, look.Z))
+                live(needle, "Rotation", math.deg(math.atan2(look.X, look.Z)))
             end
         end
 
@@ -770,19 +820,20 @@ BuildSatellites = function(W)
                 local blip = radarBlip(i)
                 local otherRoot = player ~= Players.LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart")
                 local offset = otherRoot and (otherRoot.Position - origin)
-                if offset and offset.Magnitude <= RADAR_RANGE then
+                local distance = offset and offset.Magnitude
+                if distance and distance <= RADAR_RANGE then
                     nearby += 1
                     local rx = (offset.X * cos - offset.Z * sin) / RADAR_RANGE * radius
                     local ry = (offset.X * sin + offset.Z * cos) / RADAR_RANGE * radius
-                    blip.Position = UDim2.new(0.5, rx, 0.5, ry)
-                    blip.BackgroundColor3 = if offset.Magnitude < RADAR_RANGE * 0.5 then Glass.Danger else Glass.Warning
-                    blip.Visible = true
+                    live(blip, "Position", UDim2.new(0.5, rx, 0.5, ry))
+                    live(blip, "BackgroundColor3", if distance < RADAR_RANGE * 0.5 then Glass.Danger else Glass.Warning)
+                    live(blip, "Visible", true)
                 else
-                    blip.Visible = false
+                    live(blip, "Visible", false)
                 end
             end
-            for i = #list + 1, #blips do blips[i].Visible = false end
-            countValue.Text = tostring(nearby)
+            for i = #list + 1, #blips do live(blips[i], "Visible", false) end
+            live(countValue, "Text", tostring(nearby))
         end
     end))
 

@@ -379,8 +379,15 @@ local function LiquidMover(track, body, config, flare)
         end
     end
 
+    -- The target can only move between frames (it follows tweens and layout), so a target function is
+    -- read once per frame rather than once per substep; the indicator's reads an instance property.
+    local targetFrame, frameTarget = -1, 0
+
     function mover:Step(dt)
-        local target = currentTarget()
+        if targetFrame ~= Animator.frame then
+            targetFrame, frameTarget = Animator.frame, currentTarget()
+        end
+        local target = frameTarget
         local damping = 2 * math.sqrt(config.Stiffness) * config.Damping
         self.velocity += (config.Stiffness * (target - self.value) - damping * self.velocity) * dt
         self.value += self.velocity * dt
@@ -397,12 +404,12 @@ local function LiquidMover(track, body, config, flare)
             and math.abs(self.pressTarget - self.press) < 0.002 and math.abs(self.pressVelocity) < 0.02 then
             self.value, self.velocity = target, 0
             self.press, self.pressVelocity = self.pressTarget, 0
-            render()
             return false
         end
-        render()
         return true
     end
+
+    mover.Render = render
 
     function mover:SetTarget(value)
         if typeof(value) == "function" then
@@ -410,6 +417,7 @@ local function LiquidMover(track, body, config, flare)
         else
             self.targetFn, self.target = nil, value
         end
+        targetFrame = -1 -- a new target takes effect on the very next step
         Animator.Wake(self)
     end
 

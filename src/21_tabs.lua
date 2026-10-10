@@ -92,18 +92,20 @@ BuildTabs = function(W)
         if animate then Indicator:Wake(0.7) else Indicator:Snap() end
     end
 
-    local function paintTabs()
-        for _, tab in ipairs(Window.Tabs) do
-            local on = tab == Window.ActiveTab
-            Tween(tab.Label, Motion.Hover, { TextColor3 = on and Glass.TextPrimary or Glass.TextSecondary })
-            if tab.IconImage then
-                Tween(tab.IconImage, Motion.Hover, { ImageColor3 = on and Glass.TextPrimary or Glass.Glyph })
-            end
-            for _, line in ipairs(tab.ChevronLines) do
-                Tween(line, Motion.Hover, { BackgroundColor3 = on and Glass.TextSecondary or Glass.TextMuted })
-            end
-            Tween(tab.Hover, Motion.Hover, { BackgroundTransparency = 1 })
+    local function paintTab(tab)
+        local on = tab == Window.ActiveTab
+        Tween(tab.Label, Motion.Hover, { TextColor3 = on and Glass.TextPrimary or Glass.TextSecondary })
+        if tab.IconImage then
+            Tween(tab.IconImage, Motion.Hover, { ImageColor3 = on and Glass.TextPrimary or Glass.Glyph })
         end
+        for _, line in ipairs(tab.ChevronLines) do
+            Tween(line, Motion.Hover, { BackgroundColor3 = on and Glass.TextSecondary or Glass.TextMuted })
+        end
+        Tween(tab.Hover, Motion.Hover, { BackgroundTransparency = 1 })
+    end
+
+    local function paintTabs()
+        for _, tab in ipairs(Window.Tabs) do paintTab(tab) end
     end
 
     -- Drawer effects carry a per-tab token so delayed steps from an earlier open/close never land on top
@@ -209,12 +211,6 @@ BuildTabs = function(W)
         self.y += self.vy * dt
         local lean = math.clamp(self.vx * 0.01, -7, 7)
         self.rotation += (lean - self.rotation) * math.min(1, dt * 14)
-        if self.entry then
-            self.entry.Position = UDim2.fromOffset(self.x + CHIP_WIDTH / 2, self.y)
-            self.entry.Rotation = self.rotation
-        end
-        Indicator:Wake(0.1)
-        DropSlot:Wake(0.1)
 
         local settled = math.abs(self.tx - self.x) < 0.3 and math.abs(self.ty - self.y) < 0.3
             and math.abs(self.vx) < 3 and math.abs(self.vy) < 3 and math.abs(self.rotation) < 0.1
@@ -226,6 +222,17 @@ BuildTabs = function(W)
             if landed then landed() end
         end
         return false
+    end
+
+    -- Landing hands the entry back to the sidebar and clears `entry`, so a chip that just landed is left
+    -- where the sidebar put it.
+    function Carrier:Render()
+        if self.entry then
+            self.entry.Position = UDim2.fromOffset(self.x + CHIP_WIDTH / 2, self.y)
+            self.entry.Rotation = self.rotation
+        end
+        Indicator:Wake(0.1)
+        DropSlot:Wake(0.1)
     end
 
     local function showDropSlot(visible)
@@ -650,13 +657,14 @@ BuildTabs = function(W)
         local programmaticScroll = 0
         Scroller:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
             if os.clock() < programmaticScroll or #Tab.Sections == 0 then return end
-            local top = Scroller.AbsolutePosition.Y
+            -- Runs on every scrolled frame: each card's position is read once, not once per comparison.
+            local top, scale = Scroller.AbsolutePosition.Y, Scale.Scale
             local current = Tab.Sections[1]
+            local currentY = current.Card.AbsolutePosition.Y
             for _, section in ipairs(Tab.Sections) do
-                if (section.Card.AbsolutePosition.Y - top) / Scale.Scale <= 48 then
-                    if not current or section.Card.AbsolutePosition.Y >= current.Card.AbsolutePosition.Y then
-                        current = section
-                    end
+                local y = if section == Tab.Sections[1] then currentY else section.Card.AbsolutePosition.Y
+                if (y - top) / scale <= 48 and y >= currentY then
+                    current, currentY = section, y
                 end
             end
             selectSection(Tab, current, false)
@@ -878,7 +886,9 @@ BuildTabs = function(W)
             IndicatorTrack.Visible = true
         end
         layout(false)
-        paintTabs()
+        -- Adding a tab never changes which one is active, so only the new tab needs painting. Repainting
+        -- them all made building N tabs start N² tweens.
+        paintTab(Tab)
         return Tab
     end
 

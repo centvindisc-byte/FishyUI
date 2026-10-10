@@ -132,11 +132,16 @@ local function BuildCursor(W)
     end
 
     -- GetMouseLocation excludes the top bar, while this ScreenGui ignores the inset, so add it back.
+    -- Most frames the pointer hasn't moved, so the write is skipped unless the spot actually changed.
+    local lastX, lastY
     Library:GiveSignal(RunService.Heartbeat:Connect(function()
-        if not holder.Visible then return end
+        if current == "Default" then return end
         local inset = GuiService:GetGuiInset()
         local mouse = UserInputService:GetMouseLocation()
-        holder.Position = UDim2.fromOffset(mouse.X + inset.X, mouse.Y + inset.Y)
+        local x, y = mouse.X + inset.X, mouse.Y + inset.Y
+        if x == lastX and y == lastY then return end
+        lastX, lastY = x, y
+        holder.Position = UDim2.fromOffset(x, y)
     end))
     Library:GiveSignal(UserInputService.InputBegan:Connect(function(input)
         if holder.Visible and input.UserInputType == Enum.UserInputType.MouseButton1 then
