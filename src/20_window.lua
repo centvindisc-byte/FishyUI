@@ -31,6 +31,7 @@ local WindowDefaults = {
     Bubble = true, -- minimise into a draggable glass bubble instead of vanishing
     Satellites = true, -- magnetic info pods (session, performance, server) docked to the window's side
     BubbleText = nil, -- defaults to Title, or "Menu" when there is no title
+    LowGraphics = nil, -- true/false forces low graphics mode; nil uses what the player picked last time
 }
 
 local THEME_TILE_WIDTH, THEME_TILE_HEIGHT, THEME_TILE_GAP = 98, 62, 8
@@ -45,6 +46,12 @@ function Library:CreateWindow(info)
 
     applyPrefs() -- language and font chosen on a previous run, before anything is built
     applySoundPrefs()
+    -- Decided before anything is built, so decorative layers are made hidden rather than hidden after.
+    if info.LowGraphics ~= nil then
+        self.LowGraphics = info.LowGraphics == true
+    else
+        self.LowGraphics = Prefs.LowGraphics == true
+    end
     local savedTheme = loadThemeChoice()
     local startTheme = info.Theme or savedTheme
     if startTheme and Themes[startTheme] then
@@ -662,6 +669,9 @@ function Library:CreateWindow(info)
     local Blur
     if info.Blur then
         Blur = New("BlurEffect", { Name = "FishyUIBlur", Size = 0 }, Lighting)
+        -- A full-screen blur is the most expensive thing the library asks of a GPU. Disabled, its size
+        -- still follows the window, so switching low graphics back off picks up exactly where it is.
+        if self.LowGraphics then Blur.Enabled = false end
     end
     W.Blur = Blur
 

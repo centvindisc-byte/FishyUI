@@ -127,6 +127,7 @@ local Library = {
 
     CornerRadius = 14,
     DPIScale = 1,
+    LowGraphics = false, -- trades the purely decorative effects for speed on weak devices; see SetLowGraphics
     NotifySide = "Right",
     ShowCustomCursor = true,
     ForceCheckbox = false,

@@ -275,6 +275,12 @@ FeelBox:AddDropdown("CursorStyle", {
     Default = Library.Cursor,
     Callback = function(value) Library:SetCursor(value) end,
 })
+FeelBox:AddToggle("LowGraphics", {
+    Text = "Low graphics",
+    Default = Library.LowGraphics,
+    Tooltip = "For slower devices: drops the blur, backdrop particles and glass highlights",
+    Callback = function(value) Library:SetLowGraphics(value) end,
+})
 
 local WindowBox = Interface:AddRightGroupbox("Window")
 WindowBox:AddDropdown("DPI", {

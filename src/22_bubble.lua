@@ -148,7 +148,7 @@ BuildBubble = function(W)
         for i, bar in ipairs(signalBars) do
             local lit = i <= strength
             local phase = (clock * 1.1 - (i - 1) * 0.16) % 1.8
-            local pulse = if phase < 0.4 then math.sin(phase / 0.4 * math.pi) else 0
+            local pulse = if phase < 0.4 and not Library.LowGraphics then math.sin(phase / 0.4 * math.pi) else 0
             put(bar.Frame, "Size", UDim2.fromOffset(L.SignalBarWidth, bar.Height + (if lit then pulse * 2 else 0)))
             put(bar.Frame, "BackgroundColor3", if lit then color else Glass.Glyph)
             put(bar.Frame, "BackgroundTransparency", fade(if lit then 0.12 * (1 - pulse) else 0.72, alpha))

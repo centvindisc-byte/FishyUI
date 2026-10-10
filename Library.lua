@@ -356,6 +356,7 @@ local Library = {
 
     CornerRadius = 14,
     DPIScale = 1,
+    LowGraphics = false, -- trades the purely decorative effects for speed on weak devices; see SetLowGraphics
     NotifySide = "Right",
     ShowCustomCursor = true,
     ForceCheckbox = false,
@@ -777,6 +778,15 @@ end
 -- Materials
 -------------------------------------------------------------------------------------------------------
 
+-- The purely decorative glass layers: lensed rims, soft halos and specular hairlines. Low graphics mode
+-- hides them (they are overdraw on every surface), so each one is made hidden while it is on, and
+-- Library:SetLowGraphics finds the existing ones by these names.
+local DECOR_NAMES = { GlassEdge = true, Shadow = true, Specular = true }
+local function decor(inst)
+    if Library.LowGraphics then inst.Visible = false end
+    return inst
+end
+
 -- A transparency argument may be a fixed number or a theme token / function, in which case it follows
 -- the theme (materials like Onyx or Midnight dial the edge light right down).
 local function themedTransparency(inst, property, source)
@@ -800,6 +810,7 @@ local function GlassEdge(parent, radius, transparency, zIndex)
         SliceScale = math.max(radius, 1) / L.SliceBaseRadius,
         ZIndex = zIndex or 1,
     }, parent), { ImageColor3 = "Rim" })
+    decor(edge)
     themedTransparency(edge, "ImageTransparency", transparency)
     Themed(New("UIGradient", {
         Rotation = 104,
@@ -827,6 +838,7 @@ local function GlassShadow(parent, spread, transparency, zIndex)
         SliceScale = spread / L.GlowRingInset,
         ZIndex = zIndex or 0,
     }, parent), { ImageColor3 = "Shadow" })
+    decor(shadow)
     themedTransparency(shadow, "ImageTransparency", transparency)
     return shadow
 end
@@ -842,6 +854,7 @@ local function Specular(parent, inset, transparency, zIndex)
         BorderSizePixel = 0,
         ZIndex = zIndex or 1,
     }, parent)
+    decor(line)
     New("UIGradient", {
         Transparency = NumberSequence.new({
             NumberSequenceKeypoint.new(0, 1),
@@ -1388,6 +1401,7 @@ local Prefs = {
     SkipLanguage = false,
     SkipTheme = false,
     SkipFont = false,
+    LowGraphics = false,
 }
 
 local function savePrefs()
@@ -1773,7 +1787,7 @@ local function BuildAmbient(W)
 
     local function rebuild()
         clear()
-        kind = AmbientKinds[Library.Theme] or "none"
+        kind = if Library.LowGraphics then "none" else (AmbientKinds[Library.Theme] or "none")
         if kind == "motes" then
             buildParticles(16, true, false)
         elseif kind == "embers" then
@@ -1831,6 +1845,7 @@ local function BuildAmbient(W)
 
     rebuild()
     W.Ambient = layer
+    W.RefreshAmbient = rebuild
 end
 
 -- ===== 09_cursor.lua =====
@@ -5937,6 +5952,7 @@ local WindowDefaults = {
     Bubble = true, -- minimise into a draggable glass bubble instead of vanishing
     Satellites = true, -- magnetic info pods (session, performance, server) docked to the window's side
     BubbleText = nil, -- defaults to Title, or "Menu" when there is no title
+    LowGraphics = nil, -- true/false forces low graphics mode; nil uses what the player picked last time
 }
 
 local THEME_TILE_WIDTH, THEME_TILE_HEIGHT, THEME_TILE_GAP = 98, 62, 8
@@ -5951,6 +5967,12 @@ function Library:CreateWindow(info)
 
     applyPrefs() -- language and font chosen on a previous run, before anything is built
     applySoundPrefs()
+    -- Decided before anything is built, so decorative layers are made hidden rather than hidden after.
+    if info.LowGraphics ~= nil then
+        self.LowGraphics = info.LowGraphics == true
+    else
+        self.LowGraphics = Prefs.LowGraphics == true
+    end
     local savedTheme = loadThemeChoice()
     local startTheme = info.Theme or savedTheme
     if startTheme and Themes[startTheme] then
@@ -6568,6 +6590,9 @@ function Library:CreateWindow(info)
     local Blur
     if info.Blur then
         Blur = New("BlurEffect", { Name = "FishyUIBlur", Size = 0 }, Lighting)
+        -- A full-screen blur is the most expensive thing the library asks of a GPU. Disabled, its size
+        -- still follows the window, so switching low graphics back off picks up exactly where it is.
+        if self.LowGraphics then Blur.Enabled = false end
     end
     W.Blur = Blur
 
@@ -7723,7 +7748,7 @@ BuildBubble = function(W)
         for i, bar in ipairs(signalBars) do
             local lit = i <= strength
             local phase = (clock * 1.1 - (i - 1) * 0.16) % 1.8
-            local pulse = if phase < 0.4 then math.sin(phase / 0.4 * math.pi) else 0
+            local pulse = if phase < 0.4 and not Library.LowGraphics then math.sin(phase / 0.4 * math.pi) else 0
             put(bar.Frame, "Size", UDim2.fromOffset(L.SignalBarWidth, bar.Height + (if lit then pulse * 2 else 0)))
             put(bar.Frame, "BackgroundColor3", if lit then color else Glass.Glyph)
             put(bar.Frame, "BackgroundTransparency", fade(if lit then 0.12 * (1 - pulse) else 0.72, alpha))
@@ -9939,24 +9964,57 @@ function Library:SetTheme(name)
         applyTheme(not final)
     end
 
-    local elapsed = 0
-    self.ThemeMorph = RunService.Heartbeat:Connect(function(dt)
-        elapsed += dt
-        local t = math.min(1, elapsed / THEME_MORPH_TIME)
-        blend(TweenService:GetValue(t, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), t >= 1)
-        if t >= 1 then
-            self.ThemeMorph:Disconnect()
-            self.ThemeMorph = nil
-            syncScheme()
-            self:UpdateKeybindFrame()
-        end
-    end)
+    if self.LowGraphics then
+        -- No morph: the new theme lands in one repaint instead of half a second of them.
+        self.ThemeMorph = nil
+        blend(1, true)
+        syncScheme()
+        self:UpdateKeybindFrame()
+    else
+        local elapsed = 0
+        self.ThemeMorph = RunService.Heartbeat:Connect(function(dt)
+            elapsed += dt
+            local t = math.min(1, elapsed / THEME_MORPH_TIME)
+            blend(TweenService:GetValue(t, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), t >= 1)
+            if t >= 1 then
+                self.ThemeMorph:Disconnect()
+                self.ThemeMorph = nil
+                syncScheme()
+                self:UpdateKeybindFrame()
+            end
+        end)
+    end
 
     saveThemeChoice(name)
     local window = self.Window
     if window and window._W then
         window._W:OnThemeChanged()
         if window.OnThemeChanged then task.spawn(window.OnThemeChanged, name) end
+    end
+    return true
+end
+
+-- Low graphics mode, for weak devices. It turns off what is purely decorative and costly to draw: the
+-- full-screen blur behind the window, the animated backdrop, the lensed rims, halos and specular lines on
+-- every glass surface, the bubble's signal pulse, and the theme morph (themes switch instantly). Every
+-- control, colour and animation that carries meaning stays. Off by default; the choice is saved like the
+-- sound and cursor settings, and CreateWindow's LowGraphics option overrides it.
+function Library:SetLowGraphics(enabled)
+    enabled = enabled == true
+    self.LowGraphics = enabled
+    Prefs.LowGraphics = enabled
+    savePrefs()
+    for _, gui in ipairs({ self.ScreenGui, notifyGui }) do
+        if gui and gui.Parent then
+            for _, inst in ipairs(gui:GetDescendants()) do
+                if DECOR_NAMES[inst.Name] and inst:IsA("GuiObject") then inst.Visible = not enabled end
+            end
+        end
+    end
+    local W = self.Window and self.Window._W
+    if W then
+        if W.Blur then W.Blur.Enabled = not enabled end
+        if W.RefreshAmbient then W.RefreshAmbient() end
     end
     return true
 end

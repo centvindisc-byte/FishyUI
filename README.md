@@ -87,6 +87,7 @@ Library:CreateWindow({
     Blur = true,           -- blur the game behind the window
     Bubble = true,         -- minimise into a draggable status pill
     Satellites = true,     -- enable the attachment pods
+    LowGraphics = nil,     -- true/false forces low graphics mode; nil keeps the player's saved choice
 })
 ```
 
@@ -127,7 +128,15 @@ Every element registers into `Library.Options` / `Library.Toggles` and exposes `
 `Library:ApplyScheme(table)`, `Library:GetScheme()`, `Library:SetDPIScale(percent)`,
 `Library:SetNotifySide(side)`, `Library:SetLanguage(code)`, `Library:SetFontFamily(name)`,
 `Library:SetSoundEnabled(bool)`, `Library:SetSoundVolume(0-1)`, `Library:SetCursor(style)`,
-`Library:FactoryReset()`.
+`Library:SetLowGraphics(bool)`, `Library:FactoryReset()`.
+
+### Performance
+
+Animations draw once per frame however many physics substeps they take, idle UI costs nothing, and
+repaints skip properties whose value hasn't changed. For weak devices, `Library:SetLowGraphics(true)`
+turns off what is purely decorative and costly to draw: the full-screen blur, the animated backdrop, the
+lensed rims, halos and specular lines on glass surfaces, the bubble's signal pulse and the theme morph
+(themes switch instantly). It is off by default and saved like the sound and cursor settings.
 
 ## Addons
 

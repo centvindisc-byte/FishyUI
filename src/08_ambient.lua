@@ -119,7 +119,7 @@ local function BuildAmbient(W)
 
     local function rebuild()
         clear()
-        kind = AmbientKinds[Library.Theme] or "none"
+        kind = if Library.LowGraphics then "none" else (AmbientKinds[Library.Theme] or "none")
         if kind == "motes" then
             buildParticles(16, true, false)
         elseif kind == "embers" then
@@ -177,4 +177,5 @@ local function BuildAmbient(W)
 
     rebuild()
     W.Ambient = layer
+    W.RefreshAmbient = rebuild
 end

@@ -10,6 +10,7 @@ local Prefs = {
     SkipLanguage = false,
     SkipTheme = false,
     SkipFont = false,
+    LowGraphics = false,
 }
 
 local function savePrefs()

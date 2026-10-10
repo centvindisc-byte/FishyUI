@@ -2,6 +2,15 @@
 -- Materials
 -------------------------------------------------------------------------------------------------------
 
+-- The purely decorative glass layers: lensed rims, soft halos and specular hairlines. Low graphics mode
+-- hides them (they are overdraw on every surface), so each one is made hidden while it is on, and
+-- Library:SetLowGraphics finds the existing ones by these names.
+local DECOR_NAMES = { GlassEdge = true, Shadow = true, Specular = true }
+local function decor(inst)
+    if Library.LowGraphics then inst.Visible = false end
+    return inst
+end
+
 -- A transparency argument may be a fixed number or a theme token / function, in which case it follows
 -- the theme (materials like Onyx or Midnight dial the edge light right down).
 local function themedTransparency(inst, property, source)
@@ -25,6 +34,7 @@ local function GlassEdge(parent, radius, transparency, zIndex)
         SliceScale = math.max(radius, 1) / L.SliceBaseRadius,
         ZIndex = zIndex or 1,
     }, parent), { ImageColor3 = "Rim" })
+    decor(edge)
     themedTransparency(edge, "ImageTransparency", transparency)
     Themed(New("UIGradient", {
         Rotation = 104,
@@ -52,6 +62,7 @@ local function GlassShadow(parent, spread, transparency, zIndex)
         SliceScale = spread / L.GlowRingInset,
         ZIndex = zIndex or 0,
     }, parent), { ImageColor3 = "Shadow" })
+    decor(shadow)
     themedTransparency(shadow, "ImageTransparency", transparency)
     return shadow
 end
@@ -67,6 +78,7 @@ local function Specular(parent, inset, transparency, zIndex)
         BorderSizePixel = 0,
         ZIndex = zIndex or 1,
     }, parent)
+    decor(line)
     New("UIGradient", {
         Transparency = NumberSequence.new({
             NumberSequenceKeypoint.new(0, 1),

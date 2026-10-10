@@ -40,24 +40,57 @@ function Library:SetTheme(name)
         applyTheme(not final)
     end
 
-    local elapsed = 0
-    self.ThemeMorph = RunService.Heartbeat:Connect(function(dt)
-        elapsed += dt
-        local t = math.min(1, elapsed / THEME_MORPH_TIME)
-        blend(TweenService:GetValue(t, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), t >= 1)
-        if t >= 1 then
-            self.ThemeMorph:Disconnect()
-            self.ThemeMorph = nil
-            syncScheme()
-            self:UpdateKeybindFrame()
-        end
-    end)
+    if self.LowGraphics then
+        -- No morph: the new theme lands in one repaint instead of half a second of them.
+        self.ThemeMorph = nil
+        blend(1, true)
+        syncScheme()
+        self:UpdateKeybindFrame()
+    else
+        local elapsed = 0
+        self.ThemeMorph = RunService.Heartbeat:Connect(function(dt)
+            elapsed += dt
+            local t = math.min(1, elapsed / THEME_MORPH_TIME)
+            blend(TweenService:GetValue(t, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), t >= 1)
+            if t >= 1 then
+                self.ThemeMorph:Disconnect()
+                self.ThemeMorph = nil
+                syncScheme()
+                self:UpdateKeybindFrame()
+            end
+        end)
+    end
 
     saveThemeChoice(name)
     local window = self.Window
     if window and window._W then
         window._W:OnThemeChanged()
         if window.OnThemeChanged then task.spawn(window.OnThemeChanged, name) end
+    end
+    return true
+end
+
+-- Low graphics mode, for weak devices. It turns off what is purely decorative and costly to draw: the
+-- full-screen blur behind the window, the animated backdrop, the lensed rims, halos and specular lines on
+-- every glass surface, the bubble's signal pulse, and the theme morph (themes switch instantly). Every
+-- control, colour and animation that carries meaning stays. Off by default; the choice is saved like the
+-- sound and cursor settings, and CreateWindow's LowGraphics option overrides it.
+function Library:SetLowGraphics(enabled)
+    enabled = enabled == true
+    self.LowGraphics = enabled
+    Prefs.LowGraphics = enabled
+    savePrefs()
+    for _, gui in ipairs({ self.ScreenGui, notifyGui }) do
+        if gui and gui.Parent then
+            for _, inst in ipairs(gui:GetDescendants()) do
+                if DECOR_NAMES[inst.Name] and inst:IsA("GuiObject") then inst.Visible = not enabled end
+            end
+        end
+    end
+    local W = self.Window and self.Window._W
+    if W then
+        if W.Blur then W.Blur.Enabled = not enabled end
+        if W.RefreshAmbient then W.RefreshAmbient() end
     end
     return true
 end

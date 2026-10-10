@@ -163,6 +163,7 @@ function SaveManager:IgnoreThemeSettings()
         "FontPick",
         "LanguagePick",
         "CursorStyle",
+        "LowGraphics",
         "DPI",
         "NotifySide",
     })
