@@ -737,6 +737,18 @@ BuildSatellites = function(W)
         return false
     end
 
+    -- Runs once a second while any pod is out. Most seconds the ping, its colour and the player count
+    -- haven't moved, and starting a tween toward the value a property already has only allocates a tween;
+    -- so tweens are only started toward a new goal, and plain writes go through a cache.
+    local goals, put = {}, PropertyCache()
+    local function tweenTo(inst, info, property, goal)
+        local last = goals[inst]
+        if last and last[property] == goal then return end
+        goals[inst] = goals[inst] or {}
+        goals[inst][property] = goal
+        Tween(inst, info, { [property] = goal })
+    end
+
     local function refresh()
         local session = os.clock() - Telemetry.SessionStart
         sessionTime.Text = Telemetry.Clock(session)
@@ -748,7 +760,7 @@ BuildSatellites = function(W)
         local ping = Telemetry.Ping
         pingText.Text = if ping then string.format("%d ms", math.floor(ping + 0.5)) else "-- ms"
         pingDot.Position = UDim2.fromOffset(POD_W - 12 - textWidth(pingText.Text, 12, Enum.Font.GothamMedium) - 6, 40)
-        Tween(pingDot, Motion.Hover, { BackgroundColor3 = if ping then Telemetry.StrengthColor(Telemetry.Strength(ping)) else Glass.Glyph })
+        tweenTo(pingDot, Motion.Hover, "BackgroundColor3", if ping then Telemetry.StrengthColor(Telemetry.Strength(ping)) else Glass.Glyph)
 
         local samples = Telemetry.PingSamples
         local ceiling = 150
@@ -756,18 +768,18 @@ BuildSatellites = function(W)
         for i, bar in ipairs(graphBars) do
             local value = samples[#samples - GRAPH_BARS + i]
             if value and value > 0 then
-                bar.BackgroundColor3 = Telemetry.StrengthColor(Telemetry.Strength(value))
-                bar.BackgroundTransparency = if i == GRAPH_BARS then 0.05 else 0.45
-                Tween(bar, Motion.Hover, { Size = UDim2.fromOffset(barWidth, math.max(2, value / ceiling * (GRAPH_HEIGHT - 4))) })
+                put(bar, "BackgroundColor3", Telemetry.StrengthColor(Telemetry.Strength(value)))
+                put(bar, "BackgroundTransparency", if i == GRAPH_BARS then 0.05 else 0.45)
+                tweenTo(bar, Motion.Hover, "Size", UDim2.fromOffset(barWidth, math.max(2, value / ceiling * (GRAPH_HEIGHT - 4))))
             else
-                bar.BackgroundTransparency = 1
+                put(bar, "BackgroundTransparency", 1)
             end
         end
 
         local count, max = #Players:GetPlayers(), Players.MaxPlayers
         playersValue.Text = if max > 0 then string.format("%d/%d", count, max) else tostring(count)
         playersUnit.Position = UDim2.fromOffset(12 + textWidth(playersValue.Text, 20, Enum.Font.GothamBold) + 5, 33)
-        Tween(capacityFill, Motion.Settle, { Size = UDim2.fromScale(if max > 0 then math.clamp(count / max, 0, 1) else 0, 1) })
+        tweenTo(capacityFill, Motion.Settle, "Size", UDim2.fromScale(if max > 0 then math.clamp(count / max, 0, 1) else 0, 1))
         serverMeta.Text = Telemetry.Region .. "  ·  " .. Telemetry.Executor
     end
     Telemetry.OnTick(function()

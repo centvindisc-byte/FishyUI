@@ -320,15 +320,22 @@ function Container:AddDependencyBox()
         box:Update()
     end
 
+    -- Every control change re-checks every box (a slider does it on each step of a drag), so the frame is
+    -- only touched when the answer actually flips.
+    local shown = nil
     function box:Update()
+        local visible = true
         for _, dependency in ipairs(box.Dependencies) do
             local element, expected = dependency[1], dependency[2]
             if element and element.Value ~= expected then
-                frame.Visible = false
-                return
+                visible = false
+                break
             end
         end
-        frame.Visible = true
+        if visible ~= shown then
+            shown = visible
+            frame.Visible = visible
+        end
     end
 
     table.insert(Library.DependencyBoxes, box)
